@@ -1,0 +1,10 @@
+{
+  "name": "leadreview-workflow-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build_v2_workflow.mjs",
+    "test": "node scripts/build_v2_workflow.mjs && node tests/test_lead_logic.mjs"
+  }
+}
