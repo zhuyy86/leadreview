@@ -1,9 +1,9 @@
 # LeadReview · Multi-source intake and human-review contract
 
 This repository contains an MIT-licensed extension/adaptation of
-https://github.com/erikMMIV/ai-lead-qualification-agent. The original license,
-source record, and Git history are retained. The extension was developed with
-Codex assistance.
+https://github.com/erikMMIV/ai-lead-qualification-agent. The original license
+and pinned source record are retained. This repository is a directly published
+code snapshot rather than a fork. The extension was developed with Codex assistance.
 
 LeadReview adds four webhook input shapes (`website`, `form`, `gmail`, `api`),
 strict input validation, allowlisted scoring fields, explainable score reasons,
@@ -371,7 +371,7 @@ The result is a workflow that is explainable, extensible, and suitable as a foun
 1. Clone the repository
 
 ```bash
-git clone https://github.com/erikMMIV/ai-lead-qualification-agent.git
+git clone https://github.com/zhuyy86/leadreview.git
 ```
 
 2. Import the workflow into n8n.
