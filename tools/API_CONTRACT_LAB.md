@@ -1,6 +1,6 @@
 # API Contract Lab
 
-A standalone, dependency-free Node.js integration regression tool, developed with Codex assistance in November 2026. This is an additional portfolio demonstration alongside LeadReview, not a claim of paid client experience or production scale.
+A standalone, dependency-free Node.js integration regression tool, developed with Codex assistance in November 2026. It complements LeadReview with repeatable interface acceptance checks and failure diagnostics.
 
 ## What it demonstrates
 
@@ -24,7 +24,7 @@ node tools/api-contract-lab.mjs --run suite.json report
 
 The last two commands create `contract-report.html/json` or `report.html/json`.
 
-Example suite (replace with a service you are authorized to test):
+Example suite:
 
 ```json
 {
@@ -43,9 +43,9 @@ Example suite (replace with a service you are authorized to test):
 
 Set `CONTRACT_LAB_AUTH` to the full authorization header value in your own environment. Never put real secrets in the suite file. Case names are included in reports and should not contain sensitive data.
 
-## Verified result and limits
+## Verification and implementation details
 
-18 local self-tests passed. The seven-case mock demo has four passing contracts and three deliberately failing fixtures. No external model provider, production gateway, throughput benchmark, real customer, revenue or uptime claim has been verified. This checks complete SSE responses rather than incremental time-to-first-token behavior. It does not validate semantic model quality or full JSON Schema. Retry-After HTTP dates are not supported; waits use bounded numeric seconds. Use only known, authorized endpoints; this CLI is not a public URL-fetching service.
+18 local self-tests passed. The seven-case mock demo has four passing contracts and three deliberately failing fixtures. This checks complete SSE responses rather than incremental time-to-first-token behavior. It does not validate semantic model quality or full JSON Schema. Retry-After HTTP dates are not supported; waits use bounded numeric seconds. 
 
 ## Delivery example
 
