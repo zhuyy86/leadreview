@@ -1,0 +1,76 @@
+# RunLedger · AI event delivery console
+
+An AI pipeline has finished. Its callback endpoint is returning 503. RunLedger stores the completion event, schedules delivery, records each attempt and lets an operator replay the dead letter after the endpoint recovers.
+
+![RunLedger console showing the recovered delivery and its failed first generation](docs/dashboard.png)
+
+## Run the failure demo
+
+From this directory, with Node.js 24 installed:
+
+```sh
+node server.mjs
+```
+
+Open [127.0.0.1:4327](http://127.0.0.1:4327). Set the receiver to **Down**, then select **Emit AI completion event**. Open the delivery and watch four attempts end in a dead letter. Switch the receiver to **Healthy** and choose **Replay delivery**. The same delivery ID succeeds in generation 2. Generation 1 remains in the timeline. **Transient** mode returns one 503 per delivery and then accepts a retry.
+
+## How a delivery survives failure
+
+```mermaid
+sequenceDiagram
+    participant P as AI pipeline
+    participant A as Ingestion API
+    participant D as SQLite ledger
+    participant W as Delivery worker
+    participant R as Signed receiver
+    P->>A: POST event + idempotency key
+    A->>D: Commit event and queued delivery together
+    A-->>P: 202 + stable event and delivery IDs
+    W->>D: Claim due delivery, record attempt and lease token
+    W->>R: POST signed body + delivery ID
+    R->>D: Record inbox receipt under unique delivery ID
+    R-->>W: 200
+    W->>D: Finalize only while lease token is current
+```
+
+| Boundary | Design decision |
+| --- | --- |
+| Producer → ledger | SQLite WAL and `BEGIN IMMEDIATE` make event creation and queue insertion one commit. A repeated key with an equivalent canonical payload returns the original IDs. A changed payload under the same key returns HTTP 409. |
+| Ledger → worker | Claim and attempt creation share a short transaction. Network I/O happens after commit. An expired lease becomes an audit row and releases the job for a new attempt if its budget remains. A stale token cannot finalize the new attempt. |
+| Worker → receiver | The raw request body, stable delivery ID and timestamp are signed with HMAC-SHA256. The receiver checks the signature and five-minute timestamp window before recording a receipt under a unique ID. If the receiver commits and its acknowledgment is lost, a retry can reach it again with the same ID. Its inbox suppresses the duplicate effect. |
+| Retry → operator | Timeouts, connection errors, 408, 429 and 5xx retry with bounded exponential backoff and a bounded `Retry-After`. Terminal errors and exhausted budgets enter the dead-letter view. Replay increments the generation and leaves old attempts intact. |
+
+The console and demo receiver bind to loopback. SQLite stores the queue, lease, attempt history and receiver inbox on one machine. The dashboard shows the latest 100 delivery records, with aggregate counts across the database. The demo persists under `data/runledger.sqlite` by default.
+
+## Reproduce the evidence
+
+```sh
+node --test
+node verify-workload.mjs
+```
+
+- **Eight passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks and a lost acknowledgment.
+- **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
+- **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
+- **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
+
+The verification script uses a temporary database. Tests were run on Windows with Node.js 24.1.0 and SQLite 3.49.1.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/events` | Submit `{"type":"ai.run.completed","payload":{"run":"r-1"}}` with a unique `Idempotency-Key`. |
+| `GET /api/overview` | Read queue counts, recent deliveries and receiver counters. |
+| `GET /api/deliveries/:id` | Read the event and attempt history. |
+| `POST /api/deliveries/:id/replay` | Start a new attempt generation for a dead delivery. |
+
+## 中文导览
+
+RunLedger 用 AI 任务完成回调展示事件投递的完整链路。写入事件和待投递任务是同一笔事务。worker 领取任务时写入租约和尝试记录，旧 worker 的完成请求无法覆盖新租约。接收端验签后用唯一投递 ID 写入 inbox。接收方已经处理但响应丢失时，后续投递可以安全识别重复。
+
+控制台可以切换接收端故障模式、查看每次尝试，并在恢复后重放死信。运行 `node --test` 可复现进程退出、签名篡改和响应丢失。运行 `node verify-workload.mjs` 可复现并发重复提交验证。
+
+## Design references
+
+RunLedger is an independent portfolio implementation. Its delivery semantics draw on [Hook0's explanation of delivery guarantees](https://github.com/hook0/hook0/blob/master/documentation/explanation/webhook-delivery-guarantees.md). The lease and attempt model was compared with [LiteQueue](https://github.com/litements/litequeue) and [Hookrail](https://github.com/mit112/hookrail). The demo uses the symmetric signing format described in the [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md).

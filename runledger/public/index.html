@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f4f9">
+  <title>RunLedger | Delivery Workspace</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#deliveries">Skip to deliveries</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="/" aria-label="RunLedger home">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="m7 12 9-5 9 5-9 5-9-5Z"/><path d="m7 16 9 5 9-5M7 20l9 5 9-5"/></svg></span>
+        RunLedger<span class="brand-separator" aria-hidden="true"></span><span class="brand-context">Delivery workspace</span>
+      </a>
+      <div class="top-meta"><span class="local-badge">Local sandbox</span><span id="connection" class="connection"><span class="dot"></span> Connecting</span></div>
+    </div>
+  </header>
+
+  <main class="shell workspace">
+    <div class="hero-row">
+      <section class="hero" aria-labelledby="workspace-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="hero-tick"></span> AI EVENT DELIVERY</p>
+          <h1 id="workspace-title">Delivery control<br class="hero-break"> room<span>.</span></h1>
+          <p class="hero-description">Follow an AI run from completion to webhook acknowledgement. See each attempt, recover failures, and replay dead letters.</p>
+        </div>
+        <svg class="hero-diagram" viewBox="0 0 380 238" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="trace" x1="0" x2="1" y1="0" y2="0"><stop stop-color="#6e64e0"/><stop offset="1" stop-color="#c5bdff"/></linearGradient>
+            <pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#b1a9f7" fill-opacity=".16"/></pattern>
+          </defs>
+          <rect x="0" y="2" width="378" height="232" fill="url(#dots)"/>
+          <circle cx="229" cy="119" r="88" stroke="#a399ff" stroke-opacity=".19" stroke-dasharray="2 5"/>
+          <circle cx="229" cy="119" r="66" stroke="#a399ff" stroke-opacity=".16"/>
+          <circle cx="229" cy="119" r="49" fill="#27264e" stroke="#a399ff" stroke-opacity=".36"/>
+          <path d="M26 137h46l12-22h29l12 22h41M277 119h34l18-30h27M278 128h40l13 27h26" stroke="url(#trace)" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="26" cy="137" r="4" fill="#a399ff"/><circle cx="356" cy="89" r="5" fill="#b2ebce"/><circle cx="356" cy="155" r="5" fill="#baafff"/>
+          <path d="m212 117 17-10 17 10-17 10-17-10Zm0 8 17 10 17-10m-34 8 17 10 17-10" stroke="#d5ceff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect x="182" y="184" width="94" height="23" rx="11.5" fill="#2f2c55" stroke="#a399ff" stroke-opacity=".24"/>
+          <text x="229" y="199" text-anchor="middle" fill="#c9c0fa" font-family="monospace" font-size="9" letter-spacing="1.4">EVENT QUEUE</text>
+        </svg>
+      </section>
+
+      <section class="panel receiver-panel" aria-labelledby="receiver-title">
+        <div class="panel-heading">
+          <span class="square-icon lavender" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v10H4zM8 11h3m-3 3h1m6-2h2"/></svg></span>
+          <div><p class="eyebrow light">FAILURE INJECTION</p><h2 id="receiver-title">Demo receiver</h2></div>
+          <span id="receiver-mode" class="status-pill neutral"><span class="dot"></span> Loading</span>
+        </div>
+        <div class="mode-options" role="group" aria-label="Receiver mode">
+          <button type="button" data-mode="healthy" aria-pressed="false" disabled>Healthy</button>
+          <button type="button" data-mode="transient" aria-pressed="false" disabled>Transient</button>
+          <button type="button" data-mode="down" aria-pressed="false" disabled>Down</button>
+        </div>
+        <p id="mode-hint" class="mode-hint">Waiting for the receiver…</p>
+        <div class="receiver-counters"><span><b id="receiver-processed">—</b> processed</span><span><b id="receiver-duplicates">—</b> duplicates</span></div>
+        <button type="button" id="seed" class="button primary" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Emit AI completion event
+        </button>
+      </section>
+    </div>
+
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+
+    <section class="metrics" aria-label="Delivery counters">
+      <article class="panel metric">
+        <span class="square-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 8v4l3 2"/></svg></span>
+        <div><p>Queued</p><strong data-metric="queued">—</strong></div><span class="metric-hint">Scheduled</span>
+      </article>
+      <article class="panel metric">
+        <span class="square-icon lavender" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h4l2-5 4 10 2-5h4"/></svg></span>
+        <div><p>In flight</p><strong data-metric="in_flight">—</strong></div><span class="metric-hint">With worker</span>
+      </article>
+      <article class="panel metric">
+        <span class="square-icon mint" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="m9 12 2 2 4-4"/></svg></span>
+        <div><p>Delivered</p><strong data-metric="delivered">—</strong></div><span class="metric-hint">Acknowledged</span>
+      </article>
+      <article class="panel metric">
+        <span class="square-icon rose" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 5 8 14H4l8-14Zm0 5v3m0 3h.01"/></svg></span>
+        <div><p>Dead letters</p><strong data-metric="dead">—</strong></div><span class="metric-hint">Needs replay</span>
+      </article>
+    </section>
+
+    <div class="operations">
+      <section id="deliveries" class="panel ledger" aria-labelledby="deliveries-title">
+        <div class="section-heading">
+          <div><p class="eyebrow light">EVENT LEDGER</p><h2 id="deliveries-title">Deliveries</h2></div>
+          <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg><span class="sr-only">Search events or IDs</span><input id="search" type="search" placeholder="Search events or IDs" autocomplete="off"></label>
+        </div>
+        <div class="filters" role="group" aria-label="Filter deliveries by status">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="queued" aria-pressed="false">Queued</button>
+          <button type="button" data-filter="in_flight" aria-pressed="false">In flight</button>
+          <button type="button" data-filter="delivered" aria-pressed="false">Delivered</button>
+          <button type="button" data-filter="dead" aria-pressed="false">Dead letters</button>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th scope="col">Event</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div id="empty" class="empty" hidden>
+          <span class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 7h14l2 7v5H3v-5l2-7Zm-2 7h6l1 2h4l1-2h6"/></svg></span>
+          <h3 id="empty-title">No events yet</h3>
+          <p id="empty-hint">Emit an AI completion event to create a delivery.</p>
+        </div>
+        <footer class="ledger-footer"><span id="ledger-count">Loading deliveries…</span><span><span class="dot muted"></span> Live refresh</span></footer>
+      </section>
+
+      <aside class="panel inspector" aria-labelledby="inspector-title">
+        <div class="section-heading inspector-heading"><div><p class="eyebrow light">DELIVERY DETAIL</p><h2 id="inspector-title">Attempt timeline</h2></div><span class="square-icon lavender" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14m5-12h6m-6 5h6m-6 5h6"/><circle cx="8" cy="7" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="8" cy="17" r="1.5"/></svg></span></div>
+        <div id="detail-empty" class="detail-empty">
+          <p class="detail-empty-title">Inspect a delivery</p>
+          <p>Select an event to see HTTP outcomes, retry history and replay generations.</p>
+          <div class="guide"><p>TRY A FAILED DELIVERY</p><ol><li>Set the receiver to <b>Down</b>.</li><li>Emit an event and wait for a dead letter.</li><li>Set it to <b>Healthy</b>, then replay the delivery.</li></ol></div>
+        </div>
+        <div id="detail" class="detail" hidden></div>
+      </aside>
+    </div>
+    <footer class="workspace-footer"><span>RunLedger <span class="footer-bullet">·</span> AI event delivery lab</span><span>SQLite queue <span class="footer-bullet">/</span> Signed webhook <span class="footer-bullet">/</span> Replay history</span></footer>
+  </main>
+</body>
+</html>

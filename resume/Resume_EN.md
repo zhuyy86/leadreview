@@ -1,91 +1,44 @@
-# YIYU ZHU
+# Yiyu Zhu
 
-Full-Stack Software Engineer | AI Applications, Data Systems & APIs
+Full-Stack Software Engineer
 
-China | UTC+8 | zhuyy8612@gmail.com | https://github.com/zhuyy86
+[zhuyy8612@gmail.com](mailto:zhuyy8612@gmail.com) · [GitHub](https://github.com/zhuyy86/leadreview/blob/main/PROFILE.md) · Remote contracts · 20 hours/week · China UTC+8
 
-Remote contracts | 20 hours/week | Available now
+Builds Node.js and Python applications with persistent state, failure recovery, and reproducible regression tests. Works on AI application integration at China Telecom.
 
-## PROFILE
+## RunLedger | Durable Webhook Delivery
 
-Builds verifiable business applications with Python, JavaScript and Node.js, separating input adapters, domain rules, persistence and interfaces through explicit contracts. Engineering work covers order validation, transactional snapshots, AI workflow rules and HTTP/SSE regression, with an emphasis on consistency, failure isolation and traceable decisions. At China Telecom, contributes to AI application integration by investigating interactions between input quality, configuration, platform state and event delivery.
+Independent project · Node.js 24 · SQLite · Browser console · Nov 2026
 
-## TECHNICAL CAPABILITIES
+[Source and test steps](https://github.com/zhuyy86/leadreview/tree/main/runledger)
 
-**Application engineering**: Python, JavaScript, Node.js, Streamlit, HTML, CLI; input normalization, configurable business rules, explainable scoring, shared application cores
+Delivers AI job completion notifications and lets an operator trace attempts, recover from receiver outages, and replay dead-letter deliveries from a browser.
 
-**Data & integration**: pandas, openpyxl, SQLite, CSV/XLSX, JSON/YAML, Requests, BeautifulSoup; snapshots, transactions, change detection, HTTP/JSON, SSE, MQTT
+- Writes the event and delivery in one SQLite transaction. A repeated idempotency key returns the existing delivery for the same canonical payload and HTTP 409 for a changed payload.
+- Claims jobs with expiring leases and fences stale worker writes with a lease token. Retries network errors, 429s, and 5xx responses with backoff. Manual replay retains prior attempts and the original delivery ID.
+- Signs the stable delivery ID, timestamp, and raw message with HMAC. A persistent receiver inbox records each ID once under at-least-once delivery.
+- Ran a two-process claim race and killed the winning process. A new lease reclaimed the same delivery as attempt two. A local HTTP fault test reached dead letter after 503s and returned 200 on replay with its history intact.
+- Sent 200 requests in local batches of 20 concurrent submissions with two workers. Deduplicated 100 repeat submissions and verified 100 unique deliveries and 100 receiver effects.
 
-**Quality & delivery**: pytest, Node.js self-tests, browser verification, Git; contract validation, bounded concurrency, timeouts/retries, exception isolation, audit metadata, HTML/JSON reporting
+## Selected Projects
 
-## PROJECTS
+**[OrderCheck | Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)**  Validates amounts with Decimal and quarantines conflicting groups by business key. A seven-sheet Excel report records source rows, rules, and input hashes. A 51-test suite covers validation, export, and the shared Streamlit and CLI logic.
 
-Independent engineering portfolio | Open-source extensions and purpose-built tools using AI-assisted implementation, testing and documentation
+**[API Contract Lab | HTTP and SSE Regression](https://github.com/zhuyy86/leadreview/blob/main/tools/API_CONTRACT_LAB.md)**  Exercises malformed JSON, missing SSE termination, and timeouts against a local HTTP server. Eighteen self-tests cover contract and retry behavior, with HTML diagnostics and JSON output.
 
-### OrderCheck | Order Data Quality Workbench
+**[LeadReview | AI Extraction and Human Review](https://github.com/zhuyy86/leadreview)**  Scores model-extracted information with deterministic rules and separates proposed actions from approved actions. A JavaScript source module generates the importable n8n workflow, backed by 17 assertions.
 
-Python · pandas · openpyxl · Streamlit · Decimal · pytest | Sep 2026
+## Experience
 
-https://github.com/zhuyy86/ordercheck
+**China Telecom | AI Application Engineering and Systems Integration** · Jun 2026–Present
 
-- Separated CSV/XLSX adapters, field mapping, JSON rules and reporting around a shared core used by Streamlit and CLI, establishing consistent ingestion, validation and result contracts.
+- Reproduce integration failures across input collection, configuration, recognition output, and event delivery. Adjust test conditions and retest to isolate the cause.
+- Document expected and actual behavior, reproduction steps, and retest results. Maintain configuration checks for integration and regression testing.
 
-- Used Decimal for monetary precision and preserved text identifiers; distinguished duplicates from conflicting records by composite business key, quarantining conflict groups and recording row provenance and decisions.
+## Education and Languages
 
-- Exported rules, input hashes and review reasons in seven-sheet Excel reports; 51 tests and browser checks verified parsing boundaries, exports and consistent behavior across both entry points.
+City University of Hong Kong · MSc, Electronic Information Engineering · Sep 2025–Jun 2026
 
-### API Contract Lab | Interface Contracts & Failure Regression
+Sun Yat-sen University · BEng, Aerospace Engineering · Sep 2021–Jun 2025
 
-Node.js · HTTP/JSON · SSE · HTML/JSON Reporting | Nov 2026
-
-https://github.com/zhuyy86/leadreview/blob/main/tools/API_CONTRACT_LAB.md
-
-- Decomposed API acceptance into HTTP status, nested JSON, SSE events and terminal semantics, combining timeout and latency budgets to verify response structure, stream completeness and timing constraints.
-
-- Bound concurrency and retried explicit transient failures with controlled POST replay; injected authorization through environment variables and excluded secrets and response bodies from reports.
-
-- Used localhost HTTP fault fixtures for malformed JSON, missing stream termination, timeouts and retries; 18 self-tests verified detection and execution behavior, producing HTML diagnostics and machine-readable JSON.
-
-### PriceWatch | Persistent Snapshots & Change Monitoring
-
-Python · Requests · BeautifulSoup · YAML · SQLite · pytest | Sep 2026
-
-https://github.com/zhuyy86/pricewatch
-
-- Modeled SQLite runs and product snapshots with source-isolated history; linked observations through URL-first identities with normalized-name fallback for repeatable comparisons.
-
-- Rejected duplicate keys before writes and used transactions for snapshot integrity; modeled added, unobserved, price-change and availability-change events separately to preserve observation semantics.
-
-- Generated escaped HTML reports while retaining CSV output; 27 tests covered parsing, source isolation, transactions and history comparison, with two-run and browser verification of the complete data path.
-
-### LeadReview | Explainable Rules & Workflow Routing
-
-JavaScript · Node.js · JSON · n8n Workflow | Sep 2026
-
-https://github.com/zhuyy86/leadreview
-
-- Designed a layered workflow from input normalization through AI extraction, deterministic rules and human review; constrained multi-source payloads with allowlists, length limits, email checks and scoring enums.
-
-- Decoupled business scoring from AI extraction and exposed itemized reasons; separated proposed_action from next_action and used explicit review states to control business routing.
-
-- Extracted core JavaScript into testable modules and reproducibly generated n8n workflow JSON; 17 assertions and dynamic connection checks covered invalid enums, scoring, references and embedded-source consistency.
-
-## EXPERIENCE
-
-### China Telecom
-
-AI Application Engineering & Systems Integration | Jun 2026–Present
-
-- Contribute to AI application integration and end-to-end validation across input collection, platform configuration, inference output and event delivery; document reproduction conditions, expected behavior and observed failures.
-
-- Investigate recognition failures, association inconsistencies and delayed events by examining input quality, connection state and platform parameters; adjust validation conditions and retest to isolate configuration, input and functional issues.
-
-- Document integration procedures, configuration checks and fault-reproduction steps, retaining retest results to support system debugging, regression verification and reusable technical knowledge.
-
-## EDUCATION & LANGUAGES
-
-City University of Hong Kong | MSc, Electronic Information Engineering | Sep 2025–Jun 2026
-
-Sun Yat-sen University | BEng, Aerospace Engineering | Sep 2021–Jun 2025
-
-Native Mandarin | English: CET-6 505; English-medium postgraduate education; written technical and asynchronous collaboration
+Native Mandarin · English CET-6 505 · English-medium postgraduate study
