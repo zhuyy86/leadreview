@@ -135,6 +135,10 @@ tr[data-delivery].selected td:first-child { box-shadow: inset 3px 0 var(--purple
 .empty p { font-size: .81rem; color: var(--muted); }
 .ledger-footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 19px; border-top: 1px solid #eeedf5; font-size: .74rem; color: var(--muted); }
 .ledger-footer .dot { margin-right: 4px; width: 5px; height: 5px; }
+.ledger-footer { flex-wrap: wrap; }
+.pagination { display: flex; gap: 5px; }
+.pagination button { padding: 5px 8px; border: 1px solid #e5ddf8; border-radius: 6px; background: #f8f5ff; color: var(--purple-dark); font-size: .75rem; }
+.pagination button:hover:not(:disabled) { background: var(--lavender); }
 .inspector-heading { border-bottom: 1px solid #eeedf5; }
 .detail-empty { padding: 17px 19px; font-size: .85rem; line-height: 1.45; color: var(--muted); }
 .detail-empty-title { color: var(--ink); font-size: .96rem; font-weight: 690; margin-bottom: 3px; }

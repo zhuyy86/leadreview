@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { retryDecision } from './retry.mjs';
 
 function signature(secret, id, timestamp, body) {
   return createHmac('sha256', secret).update(id + '.' + timestamp + '.').update(body).digest();
@@ -25,12 +26,6 @@ export function verify(secret, headers, body, now = Date.now()) {
   return timingSafeEqual(Buffer.from(signed.slice(3), 'base64'), signature(secret, id, timestamp, body));
 }
 
-function retryAfterMs(value, now) {
-  if (!value) return 0;
-  if (/^\d+$/.test(value)) return Number(value) * 1000;
-  return Math.max(0, (Date.parse(value) || 0) - now);
-}
-
 async function send(job, { receiverUrl, secret, timeoutMs, baseDelayMs }) {
   const body = JSON.stringify({
     id: job.event_id,
@@ -39,7 +34,7 @@ async function send(job, { receiverUrl, secret, timeoutMs, baseDelayMs }) {
     payload: JSON.parse(job.payload)
   });
   let httpStatus;
-  let retryAfter = 0;
+  let retryAfter;
   let error;
   try {
     const response = await fetch(receiverUrl, {
@@ -50,17 +45,13 @@ async function send(job, { receiverUrl, secret, timeoutMs, baseDelayMs }) {
       signal: AbortSignal.timeout(timeoutMs)
     });
     httpStatus = response.status;
-    retryAfter = retryAfterMs(response.headers.get('retry-after'), Date.now());
+    retryAfter = response.headers.get('retry-after');
     await response.body?.cancel().catch(() => {});
-    if (response.ok) return { outcome: 'delivered', httpStatus };
-    error = 'Receiver returned HTTP ' + httpStatus;
+    if (!response.ok) error = 'Receiver returned HTTP ' + httpStatus;
   } catch (cause) {
     error = cause.name === 'TimeoutError' ? 'Receiver timed out' : 'Receiver connection failed';
   }
-  const retryable = httpStatus === undefined || httpStatus === 408 || httpStatus === 429 || httpStatus >= 500;
-  if (!retryable || job.number >= job.max_attempts) return { outcome: 'dead', httpStatus, error };
-  const backoff = Math.min(10_000, Math.max(baseDelayMs * 2 ** (job.number - 1), retryAfter));
-  return { outcome: 'retry', nextAt: Date.now() + backoff, httpStatus, error };
+  return retryDecision(job, { httpStatus, retryAfter, error }, { baseDelayMs });
 }
 
 export function runWorker(store, options) {

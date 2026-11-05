@@ -89,7 +89,7 @@
       <section id="deliveries" class="panel ledger" aria-labelledby="deliveries-title">
         <div class="section-heading">
           <div><p class="eyebrow light">EVENT LEDGER</p><h2 id="deliveries-title">Deliveries</h2></div>
-          <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg><span class="sr-only">Search events or IDs</span><input id="search" type="search" placeholder="Search events or IDs" autocomplete="off"></label>
+          <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></svg><span class="sr-only">Search events or IDs</span><input id="search" type="search" placeholder="Search events or IDs" maxlength="128" autocomplete="off"></label>
         </div>
         <div class="filters" role="group" aria-label="Filter deliveries by status">
           <button type="button" data-filter="all" aria-pressed="true">All</button>
@@ -109,7 +109,14 @@
           <h3 id="empty-title">No events yet</h3>
           <p id="empty-hint">Emit an AI completion event to create a delivery.</p>
         </div>
-        <footer class="ledger-footer"><span id="ledger-count">Loading deliveries…</span><span><span class="dot muted"></span> Live refresh</span></footer>
+        <footer class="ledger-footer">
+          <span id="ledger-count" role="status">Loading deliveries…</span>
+          <nav class="pagination" aria-label="Delivery pages">
+            <button id="newest-page" type="button" disabled>Newest</button>
+            <button id="previous-page" type="button" disabled>Previous</button>
+            <button id="next-page" type="button" disabled>Next</button>
+          </nav>
+        </footer>
       </section>
 
       <aside class="panel inspector" aria-labelledby="inspector-title">

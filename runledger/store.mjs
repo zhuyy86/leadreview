@@ -18,6 +18,30 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+const statuses = new Set(['all', 'queued', 'in_flight', 'delivered', 'dead']);
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function deliveryQuery({ status = 'all', q = '', limit = 25, cursor = null } = {}) {
+  if (!statuses.has(status)) throw new DomainError(400, 'Unknown delivery status.');
+  if (typeof q !== 'string' || q.length > 128) throw new DomainError(400, 'Search is limited to 128 characters.');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new DomainError(400, 'Page limit must be an integer from 1 to 100.');
+  }
+  q = q.trim().toLowerCase();
+  let after = null;
+  if (cursor !== null) {
+    try {
+      if (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{1,1024}$/.test(cursor)) throw new Error();
+      after = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+      if (after.v !== 1 || !Number.isSafeInteger(after.t) || after.t < 0 || !uuid.test(after.id) ||
+          after.status !== status || after.q !== q || after.limit !== limit) throw new Error();
+    } catch {
+      throw new DomainError(400, 'Invalid cursor. Restart pagination after changing the search, status or limit.');
+    }
+  }
+  return { status, q, limit, after };
+}
+
 export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
   const db = new DatabaseSync(path);
   db.exec(`
@@ -50,6 +74,8 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
       WHERE status = 'queued';
     CREATE INDEX IF NOT EXISTS deliveries_expiry ON deliveries(lease_until)
       WHERE status = 'in_flight';
+    CREATE INDEX IF NOT EXISTS deliveries_created ON deliveries(created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS deliveries_status_created ON deliveries(status, created_at DESC, id DESC);
     CREATE TABLE IF NOT EXISTS attempts (
       token TEXT PRIMARY KEY,
       delivery_id TEXT NOT NULL REFERENCES deliveries(id),
@@ -77,8 +103,8 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     ) STRICT;
   `);
 
-  function transaction(callback) {
-    db.exec('BEGIN IMMEDIATE');
+  function transaction(callback, write = true) {
+    db.exec(write ? 'BEGIN IMMEDIATE' : 'BEGIN');
     try {
       const result = callback();
       db.exec('COMMIT');
@@ -201,16 +227,47 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     });
   }
 
-  function overview() {
-    const stats = { queued: 0, in_flight: 0, delivered: 0, dead: 0 };
-    for (const { status, count } of db.prepare('SELECT status, count(*) AS count FROM deliveries GROUP BY status').all()) {
-      stats[status] = count;
+  function overview(options) {
+    const { status, q, limit, after } = deliveryQuery(options);
+    const clauses = [];
+    const parameters = [];
+    if (status !== 'all') {
+      clauses.push('d.status = ?');
+      parameters.push(status);
     }
-    return {
-      stats,
-      deliveries: db.prepare(publicDelivery + ' ORDER BY d.created_at DESC, d.id LIMIT 100').all(),
-      receiver: receiverStatus()
-    };
+    if (q) {
+      // instr treats %, _ and SQL-looking text as literal search characters.
+      clauses.push('(instr(lower(e.type), ?) > 0 OR instr(d.event_id, ?) > 0 OR instr(d.id, ?) > 0)');
+      parameters.push(q, q, q);
+    }
+    const where = clauses.length ? ' WHERE ' + clauses.join(' AND ') : '';
+    return transaction(() => {
+      const stats = { queued: 0, in_flight: 0, delivered: 0, dead: 0 };
+      for (const { status, count } of db.prepare('SELECT status, count(*) AS count FROM deliveries GROUP BY status').all()) {
+        stats[status] = count;
+      }
+      const { count: matching } = db.prepare(`
+        SELECT count(*) AS count FROM deliveries d JOIN events e ON e.id = d.event_id
+      ` + where).get(...parameters);
+      let pageWhere = where;
+      const pageParameters = [...parameters];
+      if (after) {
+        pageWhere += (where ? ' AND ' : ' WHERE ') + '(d.created_at, d.id) < (?, ?)';
+        pageParameters.push(after.t, after.id);
+      }
+      const deliveries = db.prepare(publicDelivery + pageWhere +
+        ' ORDER BY d.created_at DESC, d.id DESC LIMIT ?').all(...pageParameters, limit + 1);
+      const hasMore = deliveries.length > limit;
+      if (hasMore) deliveries.pop();
+      const last = deliveries.at(-1);
+      const nextCursor = hasMore ? Buffer.from(JSON.stringify({
+        v: 1, t: last.created_at, id: last.id, status, q, limit
+      })).toString('base64url') : null;
+      return {
+        stats, deliveries, receiver: receiverStatus(),
+        page: { limit, matching, has_more: hasMore, next_cursor: nextCursor }
+      };
+    }, false);
   }
 
   function detail(id) {

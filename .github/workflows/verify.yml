@@ -1,0 +1,46 @@
+name: Verify engineering evidence
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+      - name: Generate and verify the decision workflow
+        run: npm test
+      - name: Verify generated workflow is committed
+        run: git diff --exit-code -- workflow
+      - name: Exercise HTTP and SSE failure contracts
+        run: node tools/api-contract-lab.mjs --selftest
+      - name: Exercise queue recovery, queries and retry policy
+        run: node --test runledger/test/*.test.mjs
+      - name: Reproduce concurrent idempotent submissions
+        run: node runledger/verify-workload.mjs
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise console and viewport behavior
+        run: node scripts/verify_runledger_browser.mjs

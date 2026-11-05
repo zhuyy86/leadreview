@@ -74,7 +74,7 @@ export async function startApp({
       if (req.method === 'POST' && req.headers.origin && req.headers.origin !== origin) {
         return json(res, 403, { error: 'Cross-origin writes are disabled.' });
       }
-      const { pathname } = new URL(req.url, origin);
+      const { pathname, searchParams } = new URL(req.url, origin);
       if (req.method === 'GET' && assets.has(pathname)) {
         const [name, type] = assets.get(pathname);
         const content = await readFile(new URL('public/' + name, import.meta.url));
@@ -86,7 +86,21 @@ export async function startApp({
         });
         return res.end(content);
       }
-      if (req.method === 'GET' && pathname === '/api/overview') return json(res, 200, store.overview());
+      if (req.method === 'GET' && pathname === '/api/overview') {
+        for (const key of searchParams.keys()) {
+          if (!['status', 'q', 'limit', 'cursor'].includes(key) || searchParams.getAll(key).length !== 1) {
+            throw new DomainError(400, 'Unknown or repeated overview query parameter.');
+          }
+        }
+        const limit = searchParams.get('limit');
+        if (limit !== null && !/^[1-9]\d{0,2}$/.test(limit)) {
+          throw new DomainError(400, 'Page limit must be an integer from 1 to 100.');
+        }
+        return json(res, 200, store.overview({
+          status: searchParams.get('status') ?? 'all', q: searchParams.get('q') ?? '',
+          limit: limit === null ? 25 : Number(limit), cursor: searchParams.get('cursor')
+        }));
+      }
       const detail = /^\/api\/deliveries\/([0-9a-f-]{36})$/.exec(pathname);
       if (req.method === 'GET' && detail) return json(res, 200, store.detail(detail[1]));
       const replay = /^\/api\/deliveries\/([0-9a-f-]{36})\/replay$/.exec(pathname);

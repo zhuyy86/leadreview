@@ -33,6 +33,9 @@ let detailRequest = 0;
 let tableSignature;
 let detailSignature;
 let noticeTimer;
+let pageCursors = [null];
+let loading = false;
+let searchTimer;
 
 function element(tag, className, value) {
   const node = document.createElement(tag);
@@ -62,6 +65,10 @@ function updateControls() {
   for (const button of modeButtons) button.disabled = !online || busy;
   const replayButton = select('#replay');
   if (replayButton) replayButton.disabled = !online || busy;
+  select('#previous-page').disabled = !online || busy || loading || pageCursors.length === 1;
+  select('#next-page').disabled = !online || busy || loading || !overview?.page.has_more;
+  select('#newest-page').disabled = !online || busy || loading;
+  rows.setAttribute('aria-busy', loading);
 }
 
 function setConnection(value) {
@@ -104,12 +111,7 @@ function renderOverview() {
 
 function renderTable() {
   if (!overview) return;
-  const query = select('#search').value.trim().toLowerCase();
-  const { deliveries } = overview;
-  const visible = deliveries.filter(row => (
-    (filter === 'all' || row.status === filter) &&
-    (!query || [row.type, row.event_id, row.id].some(value => String(value).toLowerCase().includes(query)))
-  ));
+  const visible = overview.deliveries;
   const signature = JSON.stringify([visible, selectedId]);
   if (signature !== tableSignature) {
     const focusedId = document.activeElement?.closest('tr[data-delivery]')?.dataset.delivery;
@@ -121,9 +123,11 @@ function renderTable() {
     tableSignature = signature;
   }
   select('#empty').hidden = visible.length > 0;
-  select('#empty-title').textContent = deliveries.length ? 'No matching deliveries' : 'No events yet';
-  select('#empty-hint').textContent = deliveries.length ? 'Change the filter or search another event.' : 'Emit an AI completion event to create a delivery.';
-  select('#ledger-count').textContent = `${number.format(visible.length)} of ${number.format(deliveries.length)} recent deliveries`;
+  const total = Object.values(overview.stats).reduce((sum, count) => sum + count, 0);
+  select('#empty-title').textContent = total ? 'No matching deliveries on this page' : 'No events yet';
+  select('#empty-hint').textContent = total ? 'Change the filter, search another event or return to newest.' : 'Emit an AI completion event to create a delivery.';
+  select('#ledger-count').textContent = `${number.format(visible.length)} shown · ${number.format(overview.page.matching)} matching · Page ${pageCursors.length}`;
+  updateControls();
 }
 
 function renderRow(delivery) {
@@ -239,17 +243,36 @@ function choose(id) {
 
 async function refresh() {
   const current = ++overviewRequest;
+  loading = true;
+  updateControls();
   try {
-    const data = await request('/api/overview');
+    const params = new URLSearchParams({ status: filter, q: select('#search').value.trim(), limit: '25' });
+    if (pageCursors.at(-1)) params.set('cursor', pageCursors.at(-1));
+    const data = await request('/api/overview?' + params);
     if (current !== overviewRequest) return;
     overview = data;
     setConnection(true);
     renderOverview();
     if (!selectedId && overview.deliveries.length) choose(overview.deliveries[0].id);
     await loadDetail();
-  } catch {
-    if (current === overviewRequest) setConnection(false);
+  } catch (error) {
+    if (current === overviewRequest) {
+      setConnection(false);
+      showNotice(error.message || 'Could not refresh deliveries.', true);
+    }
+  } finally {
+    if (current === overviewRequest) {
+      loading = false;
+      updateControls();
+    }
   }
+}
+
+function resetPages() {
+  pageCursors = [null];
+  ++overviewRequest;
+  loading = true;
+  updateControls();
 }
 
 async function mutate(path, body, onSuccess) {
@@ -287,11 +310,35 @@ for (const button of filterButtons) {
   button.addEventListener('click', () => {
     filter = button.dataset.filter;
     for (const item of filterButtons) item.setAttribute('aria-pressed', item === button);
-    renderTable();
+    clearTimeout(searchTimer);
+    searchTimer = undefined;
+    resetPages();
+    void refresh();
   });
 }
 
-select('#search').addEventListener('input', renderTable);
+select('#search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  resetPages();
+  searchTimer = setTimeout(() => {
+    searchTimer = undefined;
+    void refresh();
+  }, 250);
+});
+select('#next-page').addEventListener('click', () => {
+  if (loading || !overview?.page.next_cursor) return;
+  pageCursors.push(overview.page.next_cursor);
+  void refresh();
+});
+select('#previous-page').addEventListener('click', () => {
+  if (loading || pageCursors.length === 1) return;
+  pageCursors.pop();
+  void refresh();
+});
+select('#newest-page').addEventListener('click', () => {
+  resetPages();
+  void refresh();
+});
 rows.addEventListener('click', event => {
   const row = event.target.closest('tr[data-delivery]');
   if (!row) return;
@@ -300,7 +347,7 @@ rows.addEventListener('click', event => {
 });
 
 async function poll() {
-  if (!busy) await refresh();
+  if (!busy && !loading && !searchTimer) await refresh();
   setTimeout(poll, 1000);
 }
 
