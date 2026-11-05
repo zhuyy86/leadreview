@@ -98,6 +98,12 @@
           <button type="button" data-filter="delivered" aria-pressed="false">Delivered</button>
           <button type="button" data-filter="dead" aria-pressed="false">Dead letters</button>
         </div>
+        <div class="queue-health" aria-label="Queue health">
+          <span>Due now <b id="due-now">—</b></span>
+          <span>Scheduled <b id="scheduled">—</b></span>
+          <span>Oldest due <b id="oldest-due">—</b></span>
+          <span>Expired leases <b id="expired-leases">—</b></span>
+        </div>
         <div class="table-scroll">
           <table>
             <thead><tr><th scope="col">Event</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th></tr></thead>

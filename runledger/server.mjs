@@ -101,6 +101,7 @@ export async function startApp({
           limit: limit === null ? 25 : Number(limit), cursor: searchParams.get('cursor')
         }));
       }
+      if (req.method === 'GET' && pathname === '/api/metrics') return json(res, 200, store.metrics());
       const detail = /^\/api\/deliveries\/([0-9a-f-]{36})$/.exec(pathname);
       if (req.method === 'GET' && detail) return json(res, 200, store.detail(detail[1]));
       const replay = /^\/api\/deliveries\/([0-9a-f-]{36})\/replay$/.exec(pathname);

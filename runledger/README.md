@@ -49,7 +49,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **16 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries and retry scheduling.
+- **24 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -84,3 +84,11 @@ RunLedger 用 AI 任务完成回调展示事件投递的完整链路。写入事
 RunLedger is an independent portfolio implementation. Its delivery semantics draw on [Hook0's explanation of delivery guarantees](https://github.com/hook0/hook0/blob/master/documentation/explanation/webhook-delivery-guarantees.md). The lease and attempt model was compared with [LiteQueue](https://github.com/litements/litequeue) and [Hookrail](https://github.com/mit112/hookrail). The demo uses the symmetric signing format described in the [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md).
 
 The `Retry-After` minimum-wait behavior follows [RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after). The 24-hour automatic retry limit and equal-jitter backoff are local application policies.
+
+## Operational measurements
+
+`GET /api/metrics` returns an uncached JSON snapshot of delivery status totals, attempt outcomes, due work, scheduled work, the age of the oldest due task and expired worker leases. The snapshot uses one SQLite read transaction. Attempt totals retain failed generations after replay, while delivery totals represent current state. Reading metrics does not reclaim expired leases; workers perform that transition when claiming work.
+
+The console shows due work, scheduled work, oldest due age and expired leases alongside the existing status counters. These measurements describe this single-machine demo; they are not an availability SLO or a production monitoring deployment.
+
+The HTTP transport regressions exercise 429 recovery with the same delivery ID, terminal 400 responses, redirects that must not be followed, bounded request timeouts and a receiver's 120-second `Retry-After` minimum without waiting two minutes in the test.

@@ -99,6 +99,12 @@ async function request(path, method = 'GET', body) {
 
 function renderOverview() {
   for (const value of metricValues) value.textContent = number.format(overview.stats[value.dataset.metric] ?? 0);
+  const health = overview.queue_health;
+  select('#due-now').textContent = number.format(health.due_now);
+  select('#scheduled').textContent = number.format(health.scheduled);
+  select('#oldest-due').textContent = `${(health.oldest_due_age_ms / 1000).toFixed(1)}s`;
+  select('#expired-leases').textContent = number.format(health.expired_leases);
+  select('#expired-leases').classList.toggle('warning', health.expired_leases > 0);
   const current = modes[overview.receiver.mode];
   receiverMode.className = `status-pill ${current.color}`;
   receiverMode.replaceChildren(element('span', 'dot'), ` ${current.label}`);

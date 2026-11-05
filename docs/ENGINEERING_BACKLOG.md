@@ -34,3 +34,15 @@ Official requirements rechecked for this pass: [AWS Senior Software Engineer, Jo
 RunLedger remains a loopback, single-machine SQLite demonstration with a built-in receiver. The inbox demonstrates deduplicated receipt; an external receiver must transact its own business effect with its inbox. No hosted deployment, multi-tenant access control or external paid customer has been validated. Filtered pagination is a live view, not a cross-request snapshot. Search and exact matching counts can scan the ledger; no large-data performance claim is made.
 
 No quota state or exact reset time is exposed here. Leave a pushed checkpoint rather than claiming a five-hour limit was consumed. An existing five-hour continuation automation is enabled; do not create duplicate tasks or change Camp 2027 tasks.
+
+## 2026-11-06 operational and data-quality continuation
+
+Integrated the newer `c0e5241` LeadReview and `495d65a` PriceWatch heads before selecting changes; preserved their pagination, retry-window and transaction fixes.
+
+- Add transactionally consistent queue and attempt measurements, an uncached JSON metrics endpoint and visible queue-health counters. Keep historical failed attempts separate from current delivery status.
+- Add live HTTP transport regressions for rate limits, terminal errors, redirects, timeouts and the receiver minimum retry window. RunLedger: 24 scenarios passed locally on Linux, Node.js 24.22.1.
+- OrderCheck: 70 tests passed after KPI numeric/CSV boundary improvements. PriceWatch: 53 tests passed after complete alert-policy preflight and clean CLI error handling.
+- Browser launch remains blocked locally by the host restriction on Chromium Unix sockets. The browser regression is retained for CI; a local launch failure is not a passing browser result.
+- Resume and profile synchronization is in progress and must be rendered and inspected before reporting the export update complete.
+
+Next: inspect CI for this commit, finish bilingual exports, then measure queue-delivery latency and define durable retention/backup behavior before expanding infrastructure.

@@ -227,6 +227,37 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     });
   }
 
+  function deliveryStats() {
+    const stats = { queued: 0, in_flight: 0, delivered: 0, dead: 0 };
+    for (const { status, count } of db.prepare('SELECT status, count(*) AS count FROM deliveries GROUP BY status').all()) {
+      stats[status] = count;
+    }
+    return stats;
+  }
+
+  function queueHealth(now) {
+    const due = db.prepare(`
+      SELECT count(*) AS count, min(next_at) AS oldest_at FROM deliveries
+      WHERE status = 'queued' AND next_at <= ?
+    `).get(now);
+    return {
+      due_now: due.count,
+      oldest_due_age_ms: due.oldest_at === null ? 0 : Math.max(0, now - due.oldest_at),
+      scheduled: db.prepare("SELECT count(*) AS count FROM deliveries WHERE status = 'queued' AND next_at > ?").get(now).count,
+      expired_leases: db.prepare("SELECT count(*) AS count FROM deliveries WHERE status = 'in_flight' AND lease_until <= ?").get(now).count
+    };
+  }
+
+  function metrics(now = Date.now()) {
+    return transaction(() => {
+      const attempts = { in_flight: 0, delivered: 0, retry: 0, dead: 0, lease_expired: 0 };
+      for (const { outcome, count } of db.prepare('SELECT outcome, count(*) AS count FROM attempts GROUP BY outcome').all()) {
+        attempts[outcome] = count;
+      }
+      return { observed_at: now, deliveries: deliveryStats(), queue: queueHealth(now), attempts, receiver: receiverStatus() };
+    }, false);
+  }
+
   function overview(options) {
     const { status, q, limit, after } = deliveryQuery(options);
     const clauses = [];
@@ -242,10 +273,7 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     }
     const where = clauses.length ? ' WHERE ' + clauses.join(' AND ') : '';
     return transaction(() => {
-      const stats = { queued: 0, in_flight: 0, delivered: 0, dead: 0 };
-      for (const { status, count } of db.prepare('SELECT status, count(*) AS count FROM deliveries GROUP BY status').all()) {
-        stats[status] = count;
-      }
+      const stats = deliveryStats();
       const { count: matching } = db.prepare(`
         SELECT count(*) AS count FROM deliveries d JOIN events e ON e.id = d.event_id
       ` + where).get(...parameters);
@@ -264,7 +292,7 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
         v: 1, t: last.created_at, id: last.id, status, q, limit
       })).toString('base64url') : null;
       return {
-        stats, deliveries, receiver: receiverStatus(),
+        stats, deliveries, receiver: receiverStatus(), queue_health: queueHealth(Date.now()),
         page: { limit, matching, has_more: hasMore, next_cursor: nextCursor }
       };
     }, false);
@@ -281,5 +309,5 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     return { delivery, attempts };
   }
 
-  return { ingest, claim, finish, replay, overview, detail, setReceiver, receive, close: () => db.close() };
+  return { ingest, claim, finish, replay, overview, metrics, detail, setReceiver, receive, close: () => db.close() };
 }

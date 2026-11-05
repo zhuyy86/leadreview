@@ -12,10 +12,11 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
   let browser;
   let stopWorker;
   try {
-    const old = app.store.ingest({ key: 'old-dead', type: 'old.failed', payload: { run: 'old' } }, 1000);
-    app.store.finish(app.store.claim(1000), { outcome: 'dead', httpStatus: 400, error: 'Injected failure' }, 1001);
+    const fixtureTime = Date.now() - 180_000;
+    const old = app.store.ingest({ key: 'old-dead', type: 'old.failed', payload: { run: 'old' } }, fixtureTime);
+    app.store.finish(app.store.claim(fixtureTime), { outcome: 'dead', httpStatus: 400, error: 'Injected failure' }, fixtureTime + 1);
     for (let i = 1; i <= 130; i++) {
-      app.store.ingest({ key: 'browser-' + i, type: 'ai.run.completed', payload: { index: i } }, 2000 + i);
+      app.store.ingest({ key: 'browser-' + i, type: 'ai.run.completed', payload: { index: i } }, fixtureTime + 1000 + i);
     }
     browser = await chromium.launch({
       ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}),
@@ -97,6 +98,12 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal(await page.locator('#next-page').isVisible(), true);
+    assert.equal(await page.locator('#due-now').textContent(), '0');
+    if (process.env.RUNLEDGER_MOBILE_SCREENSHOT) {
+      const path = resolve(process.env.RUNLEDGER_MOBILE_SCREENSHOT);
+      await mkdir(dirname(path), { recursive: true });
+      await page.screenshot({ path, fullPage: true });
+    }
     assert.deepEqual(errors, []);
   } finally {
     if (browser) await browser.close();

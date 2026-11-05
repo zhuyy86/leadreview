@@ -110,6 +110,9 @@ h2 { font-size: 1.35rem; line-height: 1.2; font-weight: 730; letter-spacing: -.0
 .filters button { border: 1px solid transparent; background: transparent; padding: 5px 8px; font-size: .79rem; font-weight: 620; color: var(--muted); border-radius: 7px; white-space: nowrap; }
 .filters button:hover { color: var(--purple-dark); background: #f7f4ff; }
 .filters button[aria-pressed="true"] { color: var(--purple-dark); background: var(--lavender); border-color: #eae3fc; }
+.queue-health { display: flex; flex-wrap: wrap; gap: 6px 15px; padding: 0 19px 12px; color: var(--muted); font-size: .73rem; }
+.queue-health b { margin-left: 4px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.queue-health b.warning { color: var(--red); }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; min-width: 510px; border-collapse: collapse; table-layout: fixed; text-align: left; }
 th { background: #f8f8fc; border-block: 1px solid #eeedf5; color: #646882; font: 650 .68rem/1.15 var(--mono); text-transform: uppercase; letter-spacing: .055em; }
