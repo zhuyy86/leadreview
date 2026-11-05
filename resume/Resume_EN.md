@@ -2,43 +2,43 @@
 
 Full-Stack Software Engineer
 
-[zhuyy8612@gmail.com](mailto:zhuyy8612@gmail.com) · [GitHub](https://github.com/zhuyy86/leadreview/blob/main/PROFILE.md) · Remote contracts · 20 hours/week · China UTC+8
+[zhuyy8612@gmail.com](mailto:zhuyy8612@gmail.com) · [GitHub portfolio](https://github.com/zhuyy86/leadreview/blob/main/PROFILE.md) · Remote contracts · 20 hours/week · China UTC+8
 
-Builds Node.js and Python applications with persistent state, failure recovery, and reproducible regression tests. Works on AI application integration at China Telecom.
+Builds Node.js and Python applications with persistent state, failure recovery and reproducible tests. Supports AI application integration at China Telecom.
 
-## RunLedger | Durable Webhook Delivery
+**Stack:** JavaScript / Node.js 24 · Python · SQL / SQLite · HTTP APIs · pandas / openpyxl · Streamlit · pytest · GitHub Actions
 
-Independent project · Node.js 24 · SQLite · Browser console · Nov 2026
+## RunLedger Durable Webhook Delivery
 
-[Source and test steps](https://github.com/zhuyy86/leadreview/tree/main/runledger)
+Independent project · Node.js 24 · SQLite · Browser console · Nov 2026 · [Source and verification](https://github.com/zhuyy86/leadreview/tree/main/runledger)
 
-Delivers AI job completion notifications and lets an operator trace attempts, recover from receiver outages, and replay dead-letter deliveries from a browser.
+Delivers AI job completion events and exposes retries, receiver outages and dead-letter recovery in an operator console.
 
-- Writes the event and delivery in one SQLite transaction. A repeated idempotency key returns the existing delivery for the same canonical payload and HTTP 409 for a changed payload.
-- Claims jobs with expiring leases and fences stale worker writes with a lease token. Retries network errors, 429s, and 5xx responses with backoff. Manual replay retains prior attempts and the original delivery ID.
-- Signs the stable delivery ID, timestamp, and raw message with HMAC. A persistent receiver inbox records each ID once under at-least-once delivery.
-- Ran a two-process claim race and killed the winning process. A new lease reclaimed the same delivery as attempt two. A local HTTP fault test reached dead letter after 503s and returned 200 on replay with its history intact.
-- Sent 200 requests in local batches of 20 concurrent submissions with two workers. Deduplicated 100 repeat submissions and verified 100 unique deliveries and 100 receiver effects.
+- Commits each event and delivery together. Canonical payloads deduplicate under a stable idempotency key; changed payloads return HTTP 409.
+- Claims tasks with expiring leases and fences stale worker completions. Retries transient failures with jitter and respects the receiver's Retry-After minimum; replay preserves identity and attempt generations.
+- Signs raw messages with HMAC and uses a persistent receiver inbox to deduplicate receipts under at-least-once delivery. Verified redelivery after a lost acknowledgment and restart.
+- Adds whole-ledger status/search, cursor pagination and read-transaction metrics for queue age, delayed tasks, expired leases and attempt outcomes. Twenty-four Node.js scenarios verify queue and HTTP behavior.
+- Reproduced two-process claim competition and worker termination. Sent 200 local requests in batches of 20 with two workers: 100 repeats deduplicated, 100 unique events delivered and 100 inbox receipts. Linux/Windows and browser checks run in CI.
 
 ## Selected Projects
 
-**[OrderCheck | Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)**  Validates amounts with Decimal and quarantines conflicting groups by business key. A seven-sheet Excel report records source rows, rules, and input hashes. A 51-test suite covers validation, export, and the shared Streamlit and CLI logic.
+**[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Seventy tests cover rules, provenance, UI/CLI behavior and malformed KPI input.
 
-**[API Contract Lab | HTTP and SSE Regression](https://github.com/zhuyy86/leadreview/blob/main/tools/API_CONTRACT_LAB.md)**  Exercises malformed JSON, missing SSE termination, and timeouts against a local HTTP server. Eighteen self-tests cover contract and retry behavior, with HTML diagnostics and JSON output.
+**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Serializes predecessor lookup and snapshot commit in SQLite. Validates complete alert policies before network or output side effects. Fifty-three tests include competing writers, rollback and CLI failures.
 
-**[LeadReview | AI Extraction and Human Review](https://github.com/zhuyy86/leadreview)**  Scores model-extracted information with deterministic rules and separates proposed actions from approved actions. A JavaScript source module generates the importable n8n workflow, backed by 17 assertions.
+**[LeadReview and API Contract Lab](https://github.com/zhuyy86/leadreview)** Separates AI extraction, deterministic scoring and human review. Generated n8n code is tested without module globals. HTTP/JSON/SSE regression tooling passes 18 self-tests; lead rules have 17 explicit assertions.
 
 ## Experience
 
-**China Telecom | AI Application Engineering and Systems Integration** · Jun 2026–Present
+**China Telecom Innovation Product Operations Center** · Jun 2026-Present
 
-- Reproduce integration failures across input collection, configuration, recognition output, and event delivery. Adjust test conditions and retest to isolate the cause.
-- Document expected and actual behavior, reproduction steps, and retest results. Maintain configuration checks for integration and regression testing.
+- Support AI application integration: reproduce recognition, configuration and event-delivery failures; adjust conditions and retest to isolate the cause.
+- Record expected and actual behavior, reproduction steps and retest results; maintain configuration checks for project support.
 
 ## Education and Languages
 
-City University of Hong Kong · MSc, Electronic Information Engineering · Sep 2025–Jun 2026
+City University of Hong Kong · MSc, Electronic Information Engineering · Sep 2025-Jun 2026
 
-Sun Yat-sen University · BEng, Aerospace Engineering · Sep 2021–Jun 2025
+Sun Yat-sen University · BEng, Aerospace Engineering · Sep 2021-Jun 2025
 
 Native Mandarin · English CET-6 505 · English-medium postgraduate study

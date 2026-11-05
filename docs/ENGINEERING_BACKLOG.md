@@ -43,6 +43,8 @@ Integrated the newer `c0e5241` LeadReview and `495d65a` PriceWatch heads before 
 - Add live HTTP transport regressions for rate limits, terminal errors, redirects, timeouts and the receiver minimum retry window. RunLedger: 24 scenarios passed locally on Linux, Node.js 24.22.1.
 - OrderCheck: 70 tests passed after KPI numeric/CSV boundary improvements. PriceWatch: 53 tests passed after complete alert-policy preflight and clean CLI error handling.
 - Browser launch remains blocked locally by the host restriction on Chromium Unix sockets. The browser regression is retained for CI; a local launch failure is not a passing browser result.
-- Resume and profile synchronization is in progress and must be rendered and inspected before reporting the export update complete.
+- Bilingual resume Markdown, Word and PDF exports are synchronized with verified project behavior. Each language renders to one page; all six PDF hyperlink destinations were checked and fonts are embedded. `scripts/build_resumes.py` provides a repeatable Markdown-to-Word build.
+- Published code: [RunLedger metrics and transport](https://github.com/zhuyy86/leadreview/commit/10965e1451b9a5928d3bd40e26c878692e7a6419), [OrderCheck KPI boundaries](https://github.com/zhuyy86/ordercheck/commit/442ad9673d58eec9dac35b9d9df486e9e1e4e625), [PriceWatch alert preflight](https://github.com/zhuyy86/pricewatch/commit/707b1623078b35096001b31f2f87fb7f45a1ad05).
+- PriceWatch CI passed. LeadReview Linux and Windows CI passed; the browser job is tracked separately. OrderCheck cloud tests exposed an unpinned Arrow 26 / NumPy 1.26 incompatibility; pin Arrow to the existing lockfile version and verify a clean installation.
 
-Next: inspect CI for this commit, finish bilingual exports, then measure queue-delivery latency and define durable retention/backup behavior before expanding infrastructure.
+Next: confirm final CI, then measure queue-delivery latency and define durable retention/backup behavior before expanding infrastructure. Keep workload numbers scoped to local validation.

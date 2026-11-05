@@ -4,7 +4,7 @@
 
 I build and verify the path between an AI or business event and the application that acts on it. My portfolio includes a durable callback queue, an order reconciliation workbench, and an AI review flow with explicit decision boundaries.
 
-[English résumé](resume/Resume_EN.md) · [中文简历](resume/Resume_ZH.md) · [PDF (EN)](resume/Resume_EN.pdf) · [PDF（中文）](resume/Resume_ZH.pdf) · [Email](mailto:zhuyy8612@gmail.com)
+[English résumé](resume/Resume_EN.md) · [中文简历](resume/Resume_ZH.md) · [PDF (EN)](resume/Resume_EN.pdf) · [PDF（中文）](resume/Resume_ZH.pdf) · [Word (EN)](resume/Resume_EN.docx) · [Word（中文）](resume/Resume_ZH.docx) · [Email](mailto:zhuyy8612@gmail.com)
 
 ## Featured project · RunLedger
 
@@ -21,20 +21,22 @@ RunLedger persists the event and the delivery in one SQLite transaction. Workers
 | Receiver commits while the sender misses the acknowledgment | Two HTTP deliveries produce one inbox write. |
 | A 503 response exhausts the retry budget | Replay succeeds after recovery and keeps the previous attempts visible. |
 
+The console searches the complete ledger with cursor pagination. Read-transaction metrics expose due work, queue age, scheduled tasks, expired leases and historical attempt outcomes. **24 RunLedger scenarios** exercise these boundaries and HTTP delivery behavior.
+
 [Source, run instructions and design notes](runledger)
 
 ## Selected engineering work
 
 | Project | Design and verification |
 | --- | --- |
-| [OrderCheck](https://github.com/zhuyy86/ordercheck) | Preserves decimal money values and isolates entire groups of conflicting records. One processing core powers the CLI and Streamlit review screen. 51 tests and a seven-sheet audit workbook. |
+| [OrderCheck](https://github.com/zhuyy86/ordercheck) | Preserves decimal money values and isolates entire groups of conflicting records. One processing core powers the CLI and Streamlit review screen. 70 tests and a seven-sheet audit workbook, including invalid KPI inputs. |
 | [LeadReview](README.md#lead-intake--decision-workflow) | Separates model extraction from deterministic scoring and human approval. The workflow records why a lead was scored and distinguishes a proposed action from the action eligible to execute. |
 | [API Contract Lab](tools/API_CONTRACT_LAB.md) | Reproduces malformed JSON, incomplete server-sent event streams, and timeouts against a local HTTP fixture. The test runner records which part of the response contract failed. |
-| [PriceWatch](https://github.com/zhuyy86/pricewatch) | Commits full price snapshots atomically in SQLite and derives change events using stable identifiers. |
+| [PriceWatch](https://github.com/zhuyy86/pricewatch) | Serializes snapshot comparison and commit in SQLite. Validates complete alert policies before scraping or output. 53 tests cover snapshots, rollback, alerts and CLI failures. |
 
 ## Professional experience
 
-**China Telecom · AI Application Engineering and Systems Integration**
+**China Telecom · Innovation Product Operations Center**
 
 Reproduce integration issues across input, platform configuration, inference output and event delivery. Turn observations into actionable configuration checks, failure reproductions and retest records.
 
