@@ -22,10 +22,10 @@ Follow-up fixes after commit `8f8e914`:
 
 ## Next priorities
 
-1. Run browser interaction checks with more than 100 records; verify search, pagination, dead-letter replay, narrow screens and stale-response behavior.
-2. Sync verified changes into `PROFILE.md`, both resume Markdown files and the existing PDF/Word exports. Keep local workload scope explicit. Render every final resume page and inspect links.
-3. Add actionable operational measurements (oldest due task, retry/lease-expiry counts and delivery latency) before adding new infrastructure.
-4. Inspect OrderCheck and PriceWatch current code, CI and transaction boundaries before choosing their next substantive improvement.
+1. Measure delivery latency with explicit timestamp and replay-generation semantics; add a repeatable local workload report without presenting it as production scale.
+2. Define retention, backup and restore behavior for durable queue history, with recovery checks on a copied SQLite database.
+3. Review snapshot/CSV/report output boundaries in the Python tools and make partial-output failures visible and recoverable.
+4. Keep bilingual Markdown, Word and PDF exports synchronized only with verified results. The full-ledger browser scenario and current operational metrics are implemented and covered by CI.
 
 ## Engineering target and limits
 
@@ -45,6 +45,9 @@ Integrated the newer `c0e5241` LeadReview and `495d65a` PriceWatch heads before 
 - Browser launch remains blocked locally by the host restriction on Chromium Unix sockets. The browser regression is retained for CI; a local launch failure is not a passing browser result.
 - Bilingual resume Markdown, Word and PDF exports are synchronized with verified project behavior. Each language renders to one page; all six PDF hyperlink destinations were checked and fonts are embedded. `scripts/build_resumes.py` provides a repeatable Markdown-to-Word build.
 - Published code: [RunLedger metrics and transport](https://github.com/zhuyy86/leadreview/commit/10965e1451b9a5928d3bd40e26c878692e7a6419), [OrderCheck KPI boundaries](https://github.com/zhuyy86/ordercheck/commit/442ad9673d58eec9dac35b9d9df486e9e1e4e625), [PriceWatch alert preflight](https://github.com/zhuyy86/pricewatch/commit/707b1623078b35096001b31f2f87fb7f45a1ad05).
-- PriceWatch CI passed. LeadReview Linux and Windows CI passed; the browser job is tracked separately. OrderCheck cloud tests exposed an unpinned Arrow 26 / NumPy 1.26 incompatibility; pin Arrow to the existing lockfile version and verify a clean installation.
+- [PriceWatch CI](https://github.com/zhuyy86/pricewatch/actions/runs/42088624460) passed. The [final resume commit CI](https://github.com/zhuyy86/leadreview/actions/runs/42089892265) passed, including Linux, Windows and the browser scenario. Local Chromium remains restricted; the successful browser result is from CI.
+- OrderCheck cloud tests exposed Arrow 26 / NumPy 1.26 incompatibility. [Pin fix d187026](https://github.com/zhuyy86/ordercheck/commit/d1870268950757420483b28318ca3063974dce0d) retains Arrow 25.0.1 from the original lockfile. A clean virtual environment installed the pinned dependencies, passed all 70 tests and passed pip check. The [final CI](https://github.com/zhuyy86/ordercheck/actions/runs/42090175010) passed all 70 tests.
 
 Next: confirm final CI, then measure queue-delivery latency and define durable retention/backup behavior before expanding infrastructure. Keep workload numbers scoped to local validation.
+
+Final published resume/profile checkpoint: [`ed5d6df`](https://github.com/zhuyy86/leadreview/commit/ed5d6dfb28b857320e1add5ddd53da690476712b). All three repositories have successful CI for the delivered code; LeadReview also passed its browser interaction scenario on the final resume checkpoint.
