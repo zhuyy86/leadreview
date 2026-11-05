@@ -38,3 +38,18 @@ test('Latency excludes unfinished work and reports empty or negative-clock sampl
   assert.deepEqual(latency.generation_to_delivery, { ...empty, invalid_sample_count: 1 });
   assert.deepEqual(latency.event_to_delivery, summary(1, 90, 90, 90, 90));
 });
+
+test('Nearest-rank percentiles distinguish the 99th sample from the maximum', t => {
+  const store = openStore(':memory:');
+  t.after(() => store.close());
+  for (let elapsed = 1; elapsed <= 100; elapsed++) {
+    store.ingest({ key: 'quantile-' + elapsed, type: 'run.completed', payload: {} }, 1000);
+    store.finish(store.claim(1000), { outcome: 'delivered', httpStatus: 200 }, 1000 + elapsed);
+  }
+  for (const population of Object.values(store.metrics().latency)) {
+    assert.deepEqual(population, {
+      sample_count: 100, invalid_sample_count: 0, min_ms: 1, mean_ms: 50.5,
+      max_ms: 100, p50_ms: 50, p95_ms: 95, p99_ms: 99
+    });
+  }
+});

@@ -58,8 +58,10 @@ Base: `ed992a7`. Unrelated uncommitted edits in the original checkout were left 
 
 - Add exact nearest-rank p50/p95/p99, min/mean/max, sample counts and negative-clock exclusions for completed attempts, event-to-delivery age and successful generation duration. The three populations have explicit replay and queue-wait semantics. SQLite computes them within one read transaction.
 - Add an on-demand console inspector and refresh control so exact history scans do not run with every overview poll. Extend the browser scenario to exercise this panel.
-- Add deterministic regression cases for dead-letter replay, backoff intervals, unfinished attempts, empty populations and backward clock movement. RunLedger: 26 passing scenarios locally.
+- Add deterministic regression cases for dead-letter replay, backoff intervals, unfinished attempts, empty populations and backward clock movement. RunLedger: 27 passing scenarios locally. A fixed 1–100 ms population also verifies p50=50, p95=95, p99=99 and max=100, guarding against treating p99 as the maximum.
 - Extend the 200-request workload to verify latency sample counts and percentile ordering; retain a timestamped local report in `runledger/docs/verification-workload.json`. Runtime measurements are local observations, not production performance claims.
 - Profile, English/Chinese Markdown and existing Word/PDF exports are synchronized. Both languages rendered cleanly to one page, with six verified hyperlink targets each.
 
 Next priorities: backup/restore validation, retained-history policy, then Python partial-output recovery. Do not repeat the implemented latency work or change the sample populations without updating their definitions and tests.
+
+Published latency implementation: [`f008936`](https://github.com/zhuyy86/leadreview/commit/f008936f22174a70e94289aefda30e434c85dd50). Its [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42132970951) passed. The following precision-regression/export checkpoint adds the 100-sample percentile case; inspect its own CI after push.
