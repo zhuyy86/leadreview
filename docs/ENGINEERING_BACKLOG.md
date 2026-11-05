@@ -2,7 +2,7 @@
 
 Read this file from the latest `main` before continuing. Commit and push only verified changes; check the remote head first and preserve concurrent work. Project artifacts and bilingual resumes live in this repository.
 
-## 2026-11-06 continuation
+## 2026-11-05 continuation
 
 Base: `e9f7d97` (RunLedger delivery lab and bilingual resumes). Earlier chat notes mentioned full-ledger filtering, but that implementation was absent from this remote base. This pass implements and verifies it from the committed source.
 
@@ -13,7 +13,12 @@ Completed in the commit containing this entry:
 - Fix a retry bug: `Retry-After: 120` previously passed through a 10-second cap. Server minimums now remain intact up to 24 hours; longer waits become explicit dead letters for operator review. Add equal jitter to exponential backoff and parse all three HTTP-date forms in UTC.
 - Add a Linux/Windows Node.js 24 CI matrix for workflow generation, API contracts, RunLedger tests and the concurrent workload.
 - Local verification: existing 17 LeadReview assertions and graph checks, 18 API Contract Lab self-tests, and 16 RunLedger scenarios pass. The 200-request workload delivered 100 unique events and deduplicated 100 repeats on Linux/Node.js 24.22.1, rechecked after code changes (386 ms observed locally; no throughput claim). CI status is separate and must be checked after push.
-- Add a reproducible Playwright browser regression. Local launch is blocked by the execution environment's Unix-socket restriction; browser download also returned a truncated archive. A dedicated GitHub Actions job must provide the browser result. Do not mark this scenario passed without a recorded run.
+- Add a reproducible Playwright browser regression. Local launch is blocked by the execution environment's Unix-socket restriction; browser download also returned a truncated archive. The [first CI run](https://github.com/zhuyy86/leadreview/actions/runs/42042471068) passed the Linux suites and the browser scenario. Windows failed the generated-workflow equality check because CRLF source strings became escaped CRLF inside JSON.
+
+Follow-up fixes after commit `8f8e914`:
+
+- Move the enum sets into the serialized functions: generated n8n nodes previously referenced missing module globals (`SOURCES`, `URGENCY`, `INTENT`, `PROPERTY`). Add four tests that execute the actual embedded code without those globals, including invalid input and approval routing.
+- Normalize serialized function line endings and set text attributes while preserving the upstream foundation JSON's bytes. Recheck Windows CI after this commit.
 
 ## Next priorities
 

@@ -1,0 +1,13 @@
+*.mjs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.pdf binary
+*.docx binary
+*.png binary
+# Preserve the upstream artifact's original bytes.
+"workflow/AI Lead Qualification & Appointment Agent - V1 Foundation.json" -text

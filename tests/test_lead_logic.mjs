@@ -41,7 +41,7 @@ for (const [from, outputs] of Object.entries(workflow.connections)) {
 }
 const normalizeNode = workflow.nodes.find((node) => node.name === "Normalize Lead Data");
 const scoreNode = workflow.nodes.find((node) => node.name === "Score & Qualify Lead");
-assert(normalizeNode.parameters.jsCode.includes(normalizeIntake.toString()));
-assert(scoreNode.parameters.jsCode.includes(scoreLead.toString()));
+assert(normalizeNode.parameters.jsCode.includes(normalizeIntake.toString().replace(/\r\n/g, "\n")));
+assert(scoreNode.parameters.jsCode.includes(scoreLead.toString().replace(/\r\n/g, "\n")));
 assert(scoreNode.parameters.jsCode.includes("await_human_approval"));
 console.log("PASS: 17 explicit assertions plus dynamic workflow graph validation.");

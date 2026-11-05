@@ -40,7 +40,7 @@ node scripts/build_v2_workflow.mjs
 node tests/test_lead_logic.mjs
 ```
 
-The recorded delivery passed **17 explicit assertions** plus dynamic workflow graph checks. Import the generated JSON into n8n and configure the model credentials when connecting the workflow to an environment.
+The recorded delivery passed **17 explicit logic assertions**, workflow graph checks and **four generated-node execution tests**. The latter run the embedded JavaScript without module globals, covering all four intake sources, invalid input and approval routing. Function serialization normalizes LF line endings so Linux and Windows produce the same JSON. Import the generated JSON into n8n and configure the model credentials when connecting the workflow to an environment.
 
 ## API Contract Lab
 

@@ -8,16 +8,17 @@ const source = path.join(root, "workflow", "AI Lead Qualification & Appointment 
 const target = path.join(root, "workflow", "LeadReview - V2 Human Review.json");
 const workflow = JSON.parse(fs.readFileSync(source, "utf8"));
 workflow.name = "LeadReview - V2 Multi-Source & Human Review";
+const functionSource = fn => fn.toString().replace(/\r\n/g, "\n");
 
 const normalize = workflow.nodes.find((node) => node.name === "Normalize Lead Data");
 normalize.type = "n8n-nodes-base.code";
 normalize.typeVersion = 2;
 normalize.parameters = { jsCode:
-  normalizeIntake.toString() + "\nreturn items.map((item) => ({ json: { ...item.json, ..." +
+  functionSource(normalizeIntake) + "\nreturn items.map((item) => ({ json: { ...item.json, ..." +
   "normalizeIntake(item.json.body || item.json) } }));" };
 
 const score = workflow.nodes.find((node) => node.name === "Score & Qualify Lead");
-score.parameters.jsCode = scoreLead.toString() +
+score.parameters.jsCode = functionSource(scoreLead) +
   "\nreturn [{ json: { ...scoreLead($json.output || {}), lead_source: " +
   "$('Normalize Lead Data').item.json.lead_source, received_at: $now.toISO(), " +
   "workflow_version: '2.0' } }];";

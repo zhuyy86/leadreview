@@ -1,9 +1,5 @@
-const SOURCES = new Set(["website", "form", "gmail", "api"]);
-const URGENCY = new Set(["high", "medium", "low", "unknown"]);
-const INTENT = new Set(["emergency", "ready_to_buy", "comparison", "research", "unknown"]);
-const PROPERTY = new Set(["residential", "commercial", "unknown"]);
-
 export function normalizeIntake(payload) {
+  const SOURCES = new Set(["website", "form", "gmail", "api"]);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("Request body must be an object.");
   }
@@ -28,6 +24,9 @@ export function normalizeIntake(payload) {
 }
 
 export function scoreLead(extracted) {
+  const URGENCY = new Set(["high", "medium", "low", "unknown"]);
+  const INTENT = new Set(["emergency", "ready_to_buy", "comparison", "research", "unknown"]);
+  const PROPERTY = new Set(["residential", "commercial", "unknown"]);
   const value = extracted && typeof extracted === "object" && !Array.isArray(extracted)
     ? extracted : {};
   const clean = (name) => typeof value[name] === "string" && value[name].trim()
