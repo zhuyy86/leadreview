@@ -1,0 +1,46 @@
+{
+  "observedAt": "2026-11-05T23:52:07.011Z",
+  "node": "v24.22.1",
+  "platform": "linux",
+  "requests": 200,
+  "concurrency": 20,
+  "workers": 2,
+  "deduplicatedSubmissions": 100,
+  "delivered": 100,
+  "processedByReceiver": 100,
+  "duplicateReceiverEffects": 0,
+  "elapsedMs": 392,
+  "latencyMs": {
+    "attempt": {
+      "sample_count": 100,
+      "invalid_sample_count": 0,
+      "min_ms": 1,
+      "mean_ms": 5.89,
+      "max_ms": 32,
+      "p50_ms": 3,
+      "p95_ms": 23,
+      "p99_ms": 32
+    },
+    "event_to_delivery": {
+      "sample_count": 100,
+      "invalid_sample_count": 0,
+      "min_ms": 53,
+      "mean_ms": 147.16,
+      "max_ms": 194,
+      "p50_ms": 164,
+      "p95_ms": 189,
+      "p99_ms": 192
+    },
+    "generation_to_delivery": {
+      "sample_count": 100,
+      "invalid_sample_count": 0,
+      "min_ms": 1,
+      "mean_ms": 5.89,
+      "max_ms": 32,
+      "p50_ms": 3,
+      "p95_ms": 23,
+      "p99_ms": 32
+    }
+  },
+  "measurementScope": "Local wall-clock observations; no production throughput or availability claim."
+}

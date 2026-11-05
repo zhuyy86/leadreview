@@ -357,4 +357,33 @@ async function poll() {
   setTimeout(poll, 1000);
 }
 
+async function loadLatency() {
+  const button = select('#latency-refresh');
+  if (button.disabled) return;
+  button.disabled = true;
+  select('#latency-status').textContent = 'Measuring ledger history…';
+  try {
+    const data = await request('/api/metrics');
+    const labels = { attempt: 'Completed attempts', event_to_delivery: 'Event to delivery', generation_to_delivery: 'Generation to delivery' };
+    select('#latency-rows').replaceChildren(...Object.entries(labels).map(([key, label]) => {
+      const metric = data.latency[key];
+      const row = element('div', 'latency-row');
+      const values = ['p50_ms', 'p95_ms', 'p99_ms'].map(name => metric[name] === null ? '—' : number.format(metric[name]));
+      row.append(element('strong', null, label), element('span', null,
+        `${values.join(' / ')} ms · ${number.format(metric.sample_count)} samples · ${number.format(metric.invalid_sample_count)} invalid`));
+      return row;
+    }));
+    select('#latency-status').textContent = 'Observed ' + fullClock.format(new Date(data.observed_at));
+  } catch (error) {
+    select('#latency-status').textContent = error.message || 'Measurements unavailable. Try again.';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+select('#latency-summary').addEventListener('toggle', event => {
+  if (event.currentTarget.open) void loadLatency();
+});
+select('#latency-refresh').addEventListener('click', loadLatency);
+
 void poll();

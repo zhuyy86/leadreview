@@ -22,8 +22,8 @@ Follow-up fixes after commit `8f8e914`:
 
 ## Next priorities
 
-1. Measure delivery latency with explicit timestamp and replay-generation semantics; add a repeatable local workload report without presenting it as production scale.
-2. Define retention, backup and restore behavior for durable queue history, with recovery checks on a copied SQLite database.
+1. Delivery latency measurement is implemented below. Next add durable backup/restore behavior with recovery checks on a copied SQLite database.
+2. Define history retention and the effect of deletion on lifetime counts and percentile populations before adding cleanup.
 3. Review snapshot/CSV/report output boundaries in the Python tools and make partial-output failures visible and recoverable.
 4. Keep bilingual Markdown, Word and PDF exports synchronized only with verified results. The full-ledger browser scenario and current operational metrics are implemented and covered by CI.
 
@@ -51,3 +51,15 @@ Integrated the newer `c0e5241` LeadReview and `495d65a` PriceWatch heads before 
 Next: confirm final CI, then measure queue-delivery latency and define durable retention/backup behavior before expanding infrastructure. Keep workload numbers scoped to local validation.
 
 Final published resume/profile checkpoint: [`ed5d6df`](https://github.com/zhuyy86/leadreview/commit/ed5d6dfb28b857320e1add5ddd53da690476712b). All three repositories have successful CI for the delivered code; LeadReview also passed its browser interaction scenario on the final resume checkpoint.
+
+## 2026-11-06 latency continuation
+
+Base: `ed992a7`. Unrelated uncommitted edits in the original checkout were left untouched; this implementation used an isolated worktree.
+
+- Add exact nearest-rank p50/p95/p99, min/mean/max, sample counts and negative-clock exclusions for completed attempts, event-to-delivery age and successful generation duration. The three populations have explicit replay and queue-wait semantics. SQLite computes them within one read transaction.
+- Add an on-demand console inspector and refresh control so exact history scans do not run with every overview poll. Extend the browser scenario to exercise this panel.
+- Add deterministic regression cases for dead-letter replay, backoff intervals, unfinished attempts, empty populations and backward clock movement. RunLedger: 26 passing scenarios locally.
+- Extend the 200-request workload to verify latency sample counts and percentile ordering; retain a timestamped local report in `runledger/docs/verification-workload.json`. Runtime measurements are local observations, not production performance claims.
+- Profile, English/Chinese Markdown and existing Word/PDF exports are synchronized. Both languages rendered cleanly to one page, with six verified hyperlink targets each.
+
+Next priorities: backup/restore validation, retained-history policy, then Python partial-output recovery. Do not repeat the implemented latency work or change the sample populations without updating their definitions and tests.

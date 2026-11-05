@@ -90,6 +90,13 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
     await page.locator('#search').fill('');
     await count('131 matching');
 
+    await page.locator('#latency-summary > summary').click();
+    await page.waitForFunction(() => document.querySelector('#latency-status').textContent.startsWith('Observed '));
+    assert.equal(await page.locator('#latency-rows .latency-row').count(), 3);
+    assert.match(await page.locator('#latency-rows').textContent(), /131 samples/);
+    await page.locator('#latency-refresh').click();
+    await page.waitForFunction(() => !document.querySelector('#latency-refresh').disabled);
+
     if (process.env.RUNLEDGER_SCREENSHOT) {
       const path = resolve(process.env.RUNLEDGER_SCREENSHOT);
       await mkdir(dirname(path), { recursive: true });

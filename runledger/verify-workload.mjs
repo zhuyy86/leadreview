@@ -43,7 +43,13 @@ try {
   assert.deepEqual(overview.stats, { queued: 0, in_flight: 0, delivered: uniqueEvents, dead: 0 });
   assert.equal(overview.receiver.processed, uniqueEvents);
   assert.equal(overview.receiver.duplicates, 0);
+  const metrics = await fetch(app.url + '/api/metrics').then(response => response.json());
+  assert.equal(metrics.latency.event_to_delivery.sample_count, uniqueEvents);
+  assert.equal(metrics.latency.event_to_delivery.invalid_sample_count, 0);
+  assert.ok(metrics.latency.event_to_delivery.p50_ms <= metrics.latency.event_to_delivery.p95_ms);
+  assert.ok(metrics.latency.event_to_delivery.p95_ms <= metrics.latency.event_to_delivery.p99_ms);
   console.log(JSON.stringify({
+    observedAt: new Date().toISOString(),
     node: process.version,
     platform: process.platform,
     requests: requests.length,
@@ -53,7 +59,9 @@ try {
     delivered: overview.stats.delivered,
     processedByReceiver: overview.receiver.processed,
     duplicateReceiverEffects: 0,
-    elapsedMs: Math.round(performance.now() - started)
+    elapsedMs: Math.round(performance.now() - started),
+    latencyMs: metrics.latency,
+    measurementScope: 'Local wall-clock observations; no production throughput or availability claim.'
   }, null, 2));
 } finally {
   if (app) await app.close();

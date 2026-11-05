@@ -49,7 +49,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **24 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **26 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -92,3 +92,17 @@ The `Retry-After` minimum-wait behavior follows [RFC 9110 §10.2.3](https://www.
 The console shows due work, scheduled work, oldest due age and expired leases alongside the existing status counters. These measurements describe this single-machine demo; they are not an availability SLO or a production monitoring deployment.
 
 The HTTP transport regressions exercise 429 recovery with the same delivery ID, terminal 400 responses, redirects that must not be followed, bounded request timeouts and a receiver's 120-second `Retry-After` minimum without waiting two minutes in the test.
+
+## Latency definitions
+
+Open **Inspect delivery latency** in the console, or call `GET /api/metrics`. Measurements are computed on demand, not by every one-second overview poll. All three populations include sample counts, excluded negative-clock sample counts, min/mean/max and exact nearest-rank p50/p95/p99 in milliseconds. Empty populations return null durations rather than an artificial zero. SQLite computes the percentiles inside the same read transaction as the other metrics.
+
+| Population | Start | End and inclusion |
+| --- | --- | --- |
+| `attempt` | Attempt claim timestamp | Finished attempts across all generations, including failed and expired attempts |
+| `event_to_delivery` | Original event/queue creation timestamp | Successful completion for currently delivered events; includes queue waits, backoff and operator delay before replay |
+| `generation_to_delivery` | First claim in the successful current generation | That generation's successful completion; includes retry waits after its first claim, excludes its initial queue wait and earlier generations |
+
+Lease-expired attempt durations include the time until reclamation; they are not a network round-trip measurement. These are single-host wall-clock observations. Negative differences are excluded and counted; positive clock adjustments cannot be detected from these timestamps. Metrics scan retained history and are intended for this local demonstration, not high-volume telemetry.
+
+The [recorded local workload](docs/verification-workload.json) contains its observation time, runtime, concurrency, sample counts and latency summaries. Reproduce with `node verify-workload.mjs`; different hosts and runs will produce different timings. The workload is a correctness and measurement exercise, not a production latency SLO or throughput benchmark.

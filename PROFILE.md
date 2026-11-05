@@ -21,7 +21,7 @@ RunLedger persists the event and the delivery in one SQLite transaction. Workers
 | Receiver commits while the sender misses the acknowledgment | Two HTTP deliveries produce one inbox write. |
 | A 503 response exhausts the retry budget | Replay succeeds after recovery and keeps the previous attempts visible. |
 
-The console searches the complete ledger with cursor pagination. Read-transaction metrics expose due work, queue age, scheduled tasks, expired leases and historical attempt outcomes. **24 RunLedger scenarios** exercise these boundaries and HTTP delivery behavior.
+The console searches the complete ledger with cursor pagination. Read-transaction metrics expose due work, queue age, scheduled tasks, expired leases and historical attempt outcomes. On-demand p50/p95/p99 measurements separate attempt duration, original event age and successful replay-generation time, with sample and invalid-clock counts. **26 RunLedger scenarios** exercise these boundaries and HTTP delivery behavior.
 
 [Source, run instructions and design notes](runledger)
 

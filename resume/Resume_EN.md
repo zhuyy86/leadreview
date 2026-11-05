@@ -17,7 +17,7 @@ Delivers AI job completion events and exposes retries, receiver outages and dead
 - Commits each event and delivery together. Canonical payloads deduplicate under a stable idempotency key; changed payloads return HTTP 409.
 - Claims tasks with expiring leases and fences stale worker completions. Retries transient failures with jitter and respects the receiver's Retry-After minimum; replay preserves identity and attempt generations.
 - Signs raw messages with HMAC and uses a persistent receiver inbox to deduplicate receipts under at-least-once delivery. Verified redelivery after a lost acknowledgment and restart.
-- Adds whole-ledger status/search, cursor pagination and read-transaction metrics for queue age, delayed tasks, expired leases and attempt outcomes. Twenty-four Node.js scenarios verify queue and HTTP behavior.
+- Adds whole-ledger status/search, cursor pagination and read-transaction metrics for queue health and replay-aware p50/p95/p99 latency. Twenty-six Node.js scenarios verify queue and HTTP behavior.
 - Reproduced two-process claim competition and worker termination. Sent 200 local requests in batches of 20 with two workers: 100 repeats deduplicated, 100 unique events delivered and 100 inbox receipts. Linux/Windows and browser checks run in CI.
 
 ## Selected Projects

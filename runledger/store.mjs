@@ -248,13 +248,54 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     };
   }
 
+  function latencySummary(sampleSql) {
+    // Exact nearest-rank percentiles stay inside SQLite rather than loading
+    // the complete history into JavaScript. sampleSql is application SQL only.
+    return { ...db.prepare(`
+      WITH samples AS (${sampleSql}), ranked AS (
+        SELECT elapsed, row_number() OVER (ORDER BY elapsed) AS rank,
+          count(*) OVER () AS total FROM samples WHERE elapsed >= 0
+      )
+      SELECT count(*) AS sample_count,
+        (SELECT count(*) FROM samples WHERE elapsed < 0) AS invalid_sample_count,
+        min(elapsed) AS min_ms, round(avg(elapsed), 2) AS mean_ms, max(elapsed) AS max_ms,
+        max(CASE WHEN rank = (total * 50 + 99) / 100 THEN elapsed END) AS p50_ms,
+        max(CASE WHEN rank = (total * 95 + 99) / 100 THEN elapsed END) AS p95_ms,
+        max(CASE WHEN rank = (total * 99 + 99) / 100 THEN elapsed END) AS p99_ms
+      FROM ranked
+    `).get() };
+  }
+
+  function latencyMetrics() {
+    return {
+      attempt: latencySummary(`
+        SELECT finished_at - started_at AS elapsed FROM attempts
+        WHERE finished_at IS NOT NULL AND outcome != 'in_flight'
+      `),
+      event_to_delivery: latencySummary(`
+        SELECT a.finished_at - d.created_at AS elapsed FROM deliveries d
+        JOIN attempts a ON a.delivery_id = d.id AND a.generation = d.generation
+        WHERE d.status = 'delivered' AND a.outcome = 'delivered' AND a.finished_at IS NOT NULL
+      `),
+      generation_to_delivery: latencySummary(`
+        SELECT a.finished_at - (
+          SELECT min(first.started_at) FROM attempts first
+          WHERE first.delivery_id = d.id AND first.generation = d.generation
+        ) AS elapsed FROM deliveries d
+        JOIN attempts a ON a.delivery_id = d.id AND a.generation = d.generation
+        WHERE d.status = 'delivered' AND a.outcome = 'delivered' AND a.finished_at IS NOT NULL
+      `)
+    };
+  }
+
   function metrics(now = Date.now()) {
     return transaction(() => {
       const attempts = { in_flight: 0, delivered: 0, retry: 0, dead: 0, lease_expired: 0 };
       for (const { outcome, count } of db.prepare('SELECT outcome, count(*) AS count FROM attempts GROUP BY outcome').all()) {
         attempts[outcome] = count;
       }
-      return { observed_at: now, deliveries: deliveryStats(), queue: queueHealth(now), attempts, receiver: receiverStatus() };
+      return { observed_at: now, deliveries: deliveryStats(), queue: queueHealth(now), attempts,
+        latency: latencyMetrics(), receiver: receiverStatus() };
     }, false);
   }
 

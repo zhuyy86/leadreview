@@ -104,6 +104,12 @@
           <span>Oldest due <b id="oldest-due">—</b></span>
           <span>Expired leases <b id="expired-leases">—</b></span>
         </div>
+        <details id="latency-summary" class="latency-summary">
+          <summary>Inspect delivery latency</summary>
+          <p>Milliseconds, p50 / p95 / p99. Event age includes replay waiting; generation time starts at its first claim.</p>
+          <div id="latency-rows"></div>
+          <div class="latency-controls"><button id="latency-refresh" type="button" class="button secondary">Refresh measurements</button><span id="latency-status" role="status">Open to measure the ledger.</span></div>
+        </details>
         <div class="table-scroll">
           <table>
             <thead><tr><th scope="col">Event</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th></tr></thead>
