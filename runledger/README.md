@@ -4,6 +4,8 @@ An AI pipeline has finished. Its callback endpoint is returning 503. RunLedger s
 
 ![RunLedger console showing the recovered delivery and its failed first generation](docs/dashboard.png)
 
+[Mobile delivery view](docs/dashboard-mobile.png) · [Mobile batch-replay audit](docs/dashboard-replay-mobile.png)
+
 ## Run the failure demo
 
 From this directory, with Node.js 24 installed:
