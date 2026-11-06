@@ -92,6 +92,159 @@ export async function planRetention({ source, before }) {
   }
 }
 
+function eligibleDeliveries(db, before) {
+  return db.prepare(`
+    SELECT d.*, e.id AS source_event_id, e.idem_key, e.digest, e.type, e.payload,
+      e.created_at AS event_created_at
+    FROM deliveries d JOIN events e ON e.id = d.event_id
+    WHERE d.status = 'delivered'
+      AND (SELECT max(a.finished_at) FROM attempts a WHERE a.delivery_id = d.id
+        AND a.generation = d.generation AND a.outcome = 'delivered') < ?
+      AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.delivery_id = d.id AND a.finished_at IS NULL)
+    ORDER BY d.created_at, d.id
+  `).all(before);
+}
+
+export async function archiveDelivered({ source, output, before }) {
+  if (typeof source !== 'string' || !source || typeof output !== 'string' || !output ||
+      !Number.isSafeInteger(before) || before < 0 || before > 8640000000000000) {
+    throw new TypeError('Provide source and output paths plus a valid epoch-millisecond cutoff.');
+  }
+  source = resolve(source);
+  output = resolve(output);
+  const suffixes = ['-wal', '-shm', '-journal'];
+  if (output.toLowerCase() === source.toLowerCase() ||
+      suffixes.some(suffix => output.toLowerCase() === (source + suffix).toLowerCase())) {
+    throw new Error('Archive output must be separate from the source database and its sidecars.');
+  }
+  for (const path of [output, ...suffixes.map(suffix => output + suffix)]) {
+    try {
+      await lstat(path);
+      throw new Error('Archive output or its SQLite sidecar already exists; choose a new file path.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  if (!(await stat(source)).isFile()) throw new Error('Source must be an existing database file.');
+  const db = new DatabaseSync(source, { readOnly: true, timeout: 4000 });
+  let staging;
+  try {
+    db.exec('BEGIN');
+    inspect(db);
+    const selected = eligibleDeliveries(db, before);
+    const ids = new Set(selected.map(row => row.id));
+    await mkdir(dirname(output), { recursive: true });
+    staging = await mkdtemp(join(dirname(output), '.runledger-archive-'));
+    const temporary = join(staging, 'archive.sqlite');
+    const archive = new DatabaseSync(temporary);
+    try {
+      archive.exec(`
+        PRAGMA journal_mode = DELETE;
+        PRAGMA synchronous = FULL;
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+        CREATE TABLE events (
+          id TEXT PRIMARY KEY, idem_key TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
+          type TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL
+        ) STRICT;
+        CREATE TABLE deliveries (
+          id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES events(id),
+          status TEXT NOT NULL, generation INTEGER NOT NULL, attempt_count INTEGER NOT NULL,
+          max_attempts INTEGER NOT NULL, next_at INTEGER, created_at INTEGER NOT NULL,
+          lease_until INTEGER, lease_token TEXT, last_error TEXT
+        ) STRICT;
+        CREATE TABLE attempts (
+          token TEXT PRIMARY KEY, delivery_id TEXT NOT NULL REFERENCES deliveries(id),
+          generation INTEGER NOT NULL, number INTEGER NOT NULL, started_at INTEGER NOT NULL,
+          finished_at INTEGER, outcome TEXT NOT NULL, http_status INTEGER, error TEXT,
+          UNIQUE(delivery_id, generation, number)
+        ) STRICT;
+        CREATE TABLE inbox (delivery_id TEXT PRIMARY KEY, accepted_at INTEGER NOT NULL) STRICT;
+        CREATE TABLE operator_actions (
+          id TEXT PRIMARY KEY, operation_key TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
+          kind TEXT NOT NULL, created_at INTEGER NOT NULL, result TEXT NOT NULL
+        ) STRICT;
+      `);
+      archive.exec('BEGIN IMMEDIATE');
+      const insertEvent = archive.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)');
+      const insertDelivery = archive.prepare('INSERT INTO deliveries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const row of selected) {
+        insertEvent.run(row.source_event_id, row.idem_key, row.digest, row.type, row.payload, row.event_created_at);
+        insertDelivery.run(row.id, row.event_id, row.status, row.generation, row.attempt_count,
+          row.max_attempts, row.next_at, row.created_at, row.lease_until, row.lease_token, row.last_error);
+      }
+      const insertAttempt = archive.prepare('INSERT INTO attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      const insertInbox = archive.prepare('INSERT INTO inbox VALUES (?, ?)');
+      for (const id of ids) {
+        for (const row of db.prepare('SELECT * FROM attempts WHERE delivery_id = ? ORDER BY generation, number').all(id)) {
+          insertAttempt.run(row.token, row.delivery_id, row.generation, row.number, row.started_at,
+            row.finished_at, row.outcome, row.http_status, row.error);
+        }
+        const receipt = db.prepare('SELECT * FROM inbox WHERE delivery_id = ?').get(id);
+        if (receipt) insertInbox.run(receipt.delivery_id, receipt.accepted_at);
+      }
+      const insertAction = archive.prepare('INSERT INTO operator_actions VALUES (?, ?, ?, ?, ?, ?)');
+      let actionCount = 0;
+      const actionRows = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'operator_actions'").get()
+        ? db.prepare('SELECT * FROM operator_actions ORDER BY created_at, id').all() : [];
+      for (const row of actionRows) {
+        let targets = [];
+        try { targets = JSON.parse(row.result).deliveries ?? []; } catch { throw new Error('Operator action receipt is invalid JSON.'); }
+        if (targets.some(target => ids.has(target.id))) {
+          insertAction.run(row.id, row.operation_key, row.digest, row.kind, row.created_at, row.result);
+          actionCount++;
+        }
+      }
+      const attemptCount = archive.prepare('SELECT count(*) AS count FROM attempts').get().count;
+      const inboxCount = archive.prepare('SELECT count(*) AS count FROM inbox').get().count;
+      const metadata = {
+        format: 'runledger-delivered-archive-v1',
+        before_ms: before,
+        created_at: new Date().toISOString(),
+        source: source,
+        counts: { events: selected.length, deliveries: selected.length, attempts: attemptCount,
+          inbox: inboxCount, operator_actions: actionCount },
+        metric_contract: {
+          attempt: 'all archived finished attempts across every generation',
+          event_to_delivery: 'event created_at to successful completion of the archived current generation',
+          generation_to_delivery: 'first claim in the successful current generation to its successful completion',
+          percentile: 'exact nearest-rank; negative wall-clock differences excluded and counted'
+        },
+        identity_contract: 'Event IDs, idempotency keys/digests, delivery IDs, inbox receipts and related replay receipts are preserved.'
+      };
+      const insertMetadata = archive.prepare('INSERT INTO metadata VALUES (?, ?)');
+      for (const [key, value] of Object.entries(metadata)) insertMetadata.run(key, JSON.stringify(value));
+      archive.exec('COMMIT');
+      if (Object.values(archive.prepare('PRAGMA quick_check(1)').get())[0] !== 'ok' ||
+          archive.prepare('PRAGMA foreign_key_check').get()) throw new Error('Archive validation failed.');
+      archive.exec('VACUUM');
+    } finally {
+      archive.close();
+    }
+    db.exec('COMMIT');
+    await chmod(temporary, 0o600);
+    const handle = await open(temporary, 'r+');
+    try { await handle.sync(); } finally { await handle.close(); }
+    const sha256 = await hashFile(temporary);
+    const { size: bytes } = await stat(temporary);
+    await link(temporary, output);
+    const verified = new DatabaseSync(output, { readOnly: true });
+    let counts;
+    try {
+      if (Object.values(verified.prepare('PRAGMA quick_check(1)').get())[0] !== 'ok' ||
+          verified.prepare('PRAGMA foreign_key_check').get()) throw new Error('Published archive validation failed.');
+      counts = JSON.parse(verified.prepare("SELECT value FROM metadata WHERE key = 'counts'").get().value);
+    }
+    finally { verified.close(); }
+    return { source, output, before_ms: before, bytes, sha256, counts,
+      completed_at: new Date().toISOString(), source_modified: false };
+  } finally {
+    try { db.close(); } finally {
+      if (staging) await rm(staging, { recursive: true, force: true });
+    }
+  }
+}
+
 export async function snapshotLedger({ source, output, onProgress }) {
   if (typeof source !== 'string' || !source || typeof output !== 'string' || !output) {
     throw new TypeError('Provide source and output file paths.');
@@ -159,18 +312,26 @@ export async function main(argv = process.argv.slice(2)) {
     if (operation === 'retention-plan') {
       if (parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
           Number(parsed.values.before) > 8640000000000000) throw new Error();
+    } else if (operation === 'archive') {
+      if (!parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
+          Number(parsed.values.before) > 8640000000000000) throw new Error();
     } else if (!['backup', 'restore'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined) {
       throw new Error();
     }
   } catch {
     console.error('Usage: node maintenance.mjs backup|restore --source ledger.sqlite --output new.sqlite');
+    console.error('       node maintenance.mjs archive --source ledger.sqlite --output archive.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
     return 2;
   }
   try {
-    const result = parsed.positionals[0] === 'retention-plan'
+    const operation = parsed.positionals[0];
+    const result = operation === 'retention-plan'
       ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
-      : await snapshotLedger(parsed.values);
+      : operation === 'archive'
+        ? await archiveDelivered({ source: parsed.values.source, output: parsed.values.output,
+          before: Number(parsed.values.before) })
+        : await snapshotLedger(parsed.values);
     console.log(JSON.stringify({ operation: parsed.positionals[0], ...result }, null, 2));
     return 0;
   } catch (error) {

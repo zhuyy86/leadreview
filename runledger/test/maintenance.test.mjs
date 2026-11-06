@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { planRetention, snapshotLedger } from '../maintenance.mjs';
+import { archiveDelivered, planRetention, snapshotLedger } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
 const execute = promisify(execFile);
@@ -23,7 +23,10 @@ async function fixture(t) {
   });
   return {
     path: name => join(root, name),
-    async noStaging() { assert.ok((await readdir(root)).every(name => !name.startsWith('.runledger-snapshot-'))); },
+    async noStaging() {
+      assert.ok((await readdir(root)).every(name =>
+        !name.startsWith('.runledger-snapshot-') && !name.startsWith('.runledger-archive-')));
+    },
     open(name, options) {
       const store = openStore(join(root, name), options);
       stores.push(store);
@@ -238,4 +241,116 @@ test('Retention CLI returns a read-only plan and rejects ambiguous or invalid fl
     '--output', f.path('backup.sqlite'), '--before', '1000']), e => e.code === 2);
   await assert.rejects(planRetention({ source: f.path('source.sqlite'), before: 1.5 }), /cutoff/);
   await assert.rejects(stat(f.path('unexpected.sqlite')), { code: 'ENOENT' });
+});
+
+test('Delivered archive preserves eligible history, receipts and metric definitions from one snapshot', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const first = source.ingest(event, 100);
+  const second = source.ingest({ ...event, key: 'later' }, 120);
+  source.finish(source.claim(100), { outcome: 'dead', httpStatus: 503 }, 110);
+  source.finish(source.claim(120), { outcome: 'dead', httpStatus: 503 }, 130);
+  const action = source.replayMany({ operation_key: 'archive-batch', deliveries: [
+    { id: first.delivery_id, generation: 1 }, { id: second.delivery_id, generation: 1 }
+  ] }, 200);
+  source.finish(source.claim(200), { outcome: 'delivered', httpStatus: 200 }, 210);
+  source.finish(source.claim(220), { outcome: 'delivered', httpStatus: 200 }, 1200);
+  source.receive(first.delivery_id, 211);
+  const beforeMetrics = source.metrics(1300);
+
+  const result = await archiveDelivered({ source: f.path('source.sqlite'),
+    output: f.path('archive.sqlite'), before: 1000 });
+  assert.deepEqual(result.counts, { events: 1, deliveries: 1, attempts: 2, inbox: 1, operator_actions: 1 });
+  assert.equal(result.source_modified, false);
+  assert.equal(result.sha256, createHash('sha256').update(await readFile(f.path('archive.sqlite'))).digest('hex'));
+  const archive = new DatabaseSync(f.path('archive.sqlite'), { readOnly: true });
+  try {
+    assert.equal(archive.prepare('SELECT id FROM deliveries').get().id, first.delivery_id);
+    assert.deepEqual(archive.prepare('SELECT generation, outcome FROM attempts ORDER BY generation').all().map(row => ({ ...row })), [
+      { generation: 1, outcome: 'dead' }, { generation: 2, outcome: 'delivered' }
+    ]);
+    assert.equal(archive.prepare('SELECT delivery_id FROM inbox').get().delivery_id, first.delivery_id);
+    const receipt = archive.prepare('SELECT id, result FROM operator_actions').get();
+    assert.equal(receipt.id, action.action_id);
+    assert.equal(JSON.parse(receipt.result).deliveries.length, 2, 'The immutable batch receipt stays complete');
+    const contract = JSON.parse(archive.prepare("SELECT value FROM metadata WHERE key = 'metric_contract'").get().value);
+    assert.match(contract.attempt, /every generation/);
+    assert.match(contract.percentile, /nearest-rank/);
+    assert.equal(Object.values(archive.prepare('PRAGMA quick_check(1)').get())[0], 'ok');
+  } finally { archive.close(); }
+  assert.deepEqual(source.metrics(1300), beforeMetrics);
+  assert.equal(source.ingest(event, 1400).duplicate, true);
+  await f.noStaging();
+});
+
+test('Archive uses strict completion cutoff and protects current-generation replay history', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const item = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'dead' }, 110);
+  source.replay(item.delivery_id, 900);
+  source.finish(source.claim(900), { outcome: 'delivered' }, 1000);
+  const empty = await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('empty.sqlite'), before: 1000 });
+  assert.equal(empty.counts.deliveries, 0);
+  const included = await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('included.sqlite'), before: 1001 });
+  assert.deepEqual(included.counts, { events: 1, deliveries: 1, attempts: 2, inbox: 0, operator_actions: 0 });
+});
+
+test('Competing archive publishers produce one validated winner', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const request = { source: f.path('source.sqlite'), output: f.path('shared.sqlite'), before: 1000 };
+  const results = await Promise.allSettled([archiveDelivered(request), archiveDelivered(request)]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+  const archive = new DatabaseSync(f.path('shared.sqlite'), { readOnly: true });
+  try { assert.equal(archive.prepare('SELECT count(*) AS count FROM deliveries').get().count, 1); }
+  finally { archive.close(); }
+  await f.noStaging();
+});
+
+test('Archive rejects unsafe outputs and incompatible sources before publication', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  await assert.rejects(archiveDelivered({ source: f.path('source.sqlite'),
+    output: f.path('source.sqlite-wal'), before: 1000 }), /separate/);
+  await writeFile(f.path('existing.sqlite'), 'preserve');
+  await assert.rejects(archiveDelivered({ source: f.path('source.sqlite'),
+    output: f.path('existing.sqlite'), before: 1000 }), /already exists/);
+  assert.equal(await readFile(f.path('existing.sqlite'), 'utf8'), 'preserve');
+  await writeFile(f.path('broken.sqlite'), 'broken');
+  await assert.rejects(archiveDelivered({ source: f.path('broken.sqlite'),
+    output: f.path('absent.sqlite'), before: 1000 }));
+  await assert.rejects(stat(f.path('absent.sqlite')), { code: 'ENOENT' });
+  await f.noStaging();
+});
+
+test('Archive reads a compatible ledger created before operator receipts existed', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const legacy = new DatabaseSync(f.path('source.sqlite'));
+  try { legacy.exec('DROP TABLE operator_actions'); } finally { legacy.close(); }
+  const result = await archiveDelivered({ source: f.path('source.sqlite'),
+    output: f.path('archive.sqlite'), before: 1000 });
+  assert.equal(result.counts.deliveries, 1);
+  assert.equal(result.counts.operator_actions, 0);
+});
+
+test('Archive CLI returns verifiable JSON and validates its cutoff contract', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const args = [cli, 'archive', '--source', f.path('source.sqlite'), '--output', f.path('archive.sqlite'),
+    '--before', '1000'];
+  const result = JSON.parse((await execute(process.execPath, args)).stdout);
+  assert.equal(result.operation, 'archive');
+  assert.equal(result.counts.deliveries, 1);
+  for (const value of ['-1', '1.5', 'NaN', '8640000000000001']) {
+    await assert.rejects(execute(process.execPath, [...args.slice(0, -1), value]), error => error.code === 2);
+  }
 });
