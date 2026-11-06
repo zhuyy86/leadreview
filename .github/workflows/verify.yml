@@ -41,7 +41,14 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - name: Select runner browser
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            browser_executable=$(command -v google-chrome)
+            echo "CHROMIUM_EXECUTABLE=$browser_executable" >> "$GITHUB_ENV"
+          else
+            npx playwright install --with-deps chromium
+          fi
       - name: Exercise console and viewport behavior
         env:
           RUNLEDGER_SCREENSHOT: artifacts/runledger-desktop.png
