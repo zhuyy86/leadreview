@@ -182,11 +182,76 @@ export async function verifyArtifactManifest({ artifact, manifest, secretFile })
     throw new Error('Artifact checksum or byte count does not match the manifest.');
   }
   const inspected = inspectOfflineArtifact(artifact);
+  const after = await lstat(artifact, { bigint: true });
+  if (!sameFileObservation(info, after)) throw new Error('Artifact changed while its manifest was being verified.');
   if (inspected.kind !== body.artifact_kind || canonicalJson(inspected.details) !== canonicalJson(body.details)) {
     throw new Error('Artifact contents do not match the manifest metadata.');
   }
   return { verified: true, artifact, manifest, artifact_kind: inspected.kind,
     artifact_bytes: Number(info.size), artifact_sha256: sha256, created_at: body.created_at };
+}
+
+function exactHistoryRows(path, query, validate) {
+  const db = new DatabaseSync(path, { readOnly: true, timeout: 4000 });
+  try {
+    if (validate) inspect(db);
+    return db.prepare(`
+      SELECT d.id AS delivery_id, e.id AS event_id, e.idem_key, e.digest, e.type,
+        e.created_at AS event_created_at, d.status, d.generation, d.attempt_count,
+        d.max_attempts, d.created_at AS delivery_created_at
+      FROM events e JOIN deliveries d ON d.event_id = e.id
+      WHERE d.id = ? OR e.id = ? OR e.idem_key = ?
+      ORDER BY d.created_at, d.id
+    `).all(query, query, query).map(row => ({ ...row }));
+  } finally { db.close(); }
+}
+
+export async function locateHistory({ source, archives, secretFile, query }) {
+  if (typeof source !== 'string' || !source || typeof secretFile !== 'string' || !secretFile ||
+      typeof query !== 'string' || query.length < 1 || query.length > 256 ||
+      !Array.isArray(archives) || archives.length < 1 || archives.length > 20 ||
+      archives.some(item => !item || typeof item.artifact !== 'string' || !item.artifact ||
+        typeof item.manifest !== 'string' || !item.manifest)) {
+    throw new TypeError('Provide a source, secret key, 1 to 20 archive/manifest pairs and a 1 to 256 character query.');
+  }
+  source = resolve(source);
+  const resolved = archives.map(item => ({ artifact: resolve(item.artifact), manifest: resolve(item.manifest) }));
+  if (new Set(resolved.map(item => item.artifact.toLowerCase())).size !== resolved.length ||
+      new Set(resolved.map(item => item.manifest.toLowerCase())).size !== resolved.length) {
+    throw new Error('Archive and manifest paths must be unique.');
+  }
+
+  const candidates = exactHistoryRows(source, query, true).map(record => ({ record,
+    location: { kind: 'active_ledger', path: source } }));
+  for (const item of resolved) {
+    const before = await lstat(item.artifact, { bigint: true });
+    const verified = await verifyArtifactManifest({ artifact: item.artifact, manifest: item.manifest, secretFile });
+    if (verified.artifact_kind !== 'delivered_archive') throw new Error('History lookup accepts delivered archives only.');
+    const rows = exactHistoryRows(item.artifact, query, false);
+    const after = await lstat(item.artifact, { bigint: true });
+    if (!sameFileObservation(before, after)) throw new Error('Archive changed during history lookup.');
+    for (const record of rows) {
+      candidates.push({ record, location: { kind: 'delivered_archive', path: item.artifact,
+        manifest: item.manifest, artifact_sha256: verified.artifact_sha256,
+        manifest_created_at: verified.created_at } });
+    }
+  }
+
+  const matches = new Map();
+  for (const candidate of candidates) {
+    const current = matches.get(candidate.record.delivery_id);
+    if (!current) {
+      matches.set(candidate.record.delivery_id, { ...candidate.record, locations: [candidate.location] });
+      continue;
+    }
+    const { locations, ...record } = current;
+    if (canonicalJson(record) !== canonicalJson(candidate.record)) {
+      throw new Error('Conflicting history found for delivery ' + candidate.record.delivery_id + '.');
+    }
+    locations.push(candidate.location);
+  }
+  return { source, query, archives_verified: resolved.length,
+    matches: [...matches.values()].sort((left, right) => left.delivery_id.localeCompare(right.delivery_id)) };
 }
 
 export async function planRetention({ source, before }) {
@@ -453,24 +518,38 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true,
       options: { source: { type: 'string' }, output: { type: 'string' }, before: { type: 'string' },
-        artifact: { type: 'string' }, manifest: { type: 'string' }, 'secret-file': { type: 'string' } } });
+        artifact: { type: 'string' }, manifest: { type: 'string' }, 'secret-file': { type: 'string' },
+        archive: { type: 'string', multiple: true }, 'archive-manifest': { type: 'string', multiple: true },
+        id: { type: 'string' } } });
     const operation = parsed.positionals[0];
     if (parsed.positionals.length !== 1) throw new Error();
+    const archiveOptions = parsed.values.archive ?? [];
+    const archiveManifestOptions = parsed.values['archive-manifest'] ?? [];
     if (operation === 'sign-manifest') {
       if (!parsed.values.artifact || !parsed.values.output || !parsed.values['secret-file'] || parsed.values.source ||
-          parsed.values.manifest || parsed.values.before !== undefined) throw new Error();
+          parsed.values.manifest || parsed.values.before !== undefined || archiveOptions.length ||
+          archiveManifestOptions.length || parsed.values.id) throw new Error();
     } else if (operation === 'verify-manifest') {
       if (!parsed.values.artifact || !parsed.values.manifest || !parsed.values['secret-file'] || parsed.values.source ||
-          parsed.values.output || parsed.values.before !== undefined) throw new Error();
+          parsed.values.output || parsed.values.before !== undefined || archiveOptions.length ||
+          archiveManifestOptions.length || parsed.values.id) throw new Error();
+    } else if (operation === 'locate-history') {
+      if (!parsed.values.source || !parsed.values['secret-file'] || !parsed.values.id || parsed.values.artifact ||
+          parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
+          archiveOptions.length < 1 || archiveOptions.length > 20 ||
+          archiveOptions.length !== archiveManifestOptions.length) throw new Error();
     } else if (!parsed.values.source || parsed.values.artifact || parsed.values.manifest || parsed.values['secret-file']) {
       throw new Error();
     } else if (operation === 'retention-plan') {
       if (parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
-          Number(parsed.values.before) > 8640000000000000) throw new Error();
+          Number(parsed.values.before) > 8640000000000000 || archiveOptions.length ||
+          archiveManifestOptions.length || parsed.values.id) throw new Error();
     } else if (operation === 'archive') {
       if (!parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
-          Number(parsed.values.before) > 8640000000000000) throw new Error();
-    } else if (!['backup', 'restore'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined) {
+          Number(parsed.values.before) > 8640000000000000 || archiveOptions.length ||
+          archiveManifestOptions.length || parsed.values.id) throw new Error();
+    } else if (!['backup', 'restore'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined ||
+        archiveOptions.length || archiveManifestOptions.length || parsed.values.id) {
       throw new Error();
     }
   } catch {
@@ -479,6 +558,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs sign-manifest --artifact file.sqlite --output file.manifest.json --secret-file key');
     console.error('       node maintenance.mjs verify-manifest --artifact file.sqlite --manifest file.manifest.json --secret-file key');
+    console.error('       node maintenance.mjs locate-history --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key --id value');
     return 2;
   }
   try {
@@ -489,6 +569,10 @@ export async function main(argv = process.argv.slice(2)) {
       : operation === 'verify-manifest'
         ? await verifyArtifactManifest({ artifact: parsed.values.artifact, manifest: parsed.values.manifest,
           secretFile: parsed.values['secret-file'] })
+        : operation === 'locate-history'
+          ? await locateHistory({ source: parsed.values.source, secretFile: parsed.values['secret-file'],
+            query: parsed.values.id, archives: parsed.values.archive.map((artifact, index) =>
+              ({ artifact, manifest: parsed.values['archive-manifest'][index] })) })
         : operation === 'retention-plan'
           ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
           : operation === 'archive'

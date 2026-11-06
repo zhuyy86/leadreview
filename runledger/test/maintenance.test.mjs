@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { archiveDelivered, createArtifactManifest, planRetention, snapshotLedger,
-  verifyArtifactManifest } from '../maintenance.mjs';
+  locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
 const execute = promisify(execFile);
@@ -486,4 +486,105 @@ test('Manifest CLI signs and verifies offline artifacts with strict argument sha
   await assert.rejects(execute(process.execPath, [...verify, '--output', f.path('extra')]), error => error.code === 2);
   await assert.rejects(execute(process.execPath, [cli, 'sign-manifest', '--artifact', f.path('backup.sqlite')]),
     error => error.code === 2);
+});
+
+test('History lookup verifies an archive and deduplicates its active-ledger copy', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered', httpStatus: 200 }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 11));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+
+  const result = await locateHistory({ source: f.path('source.sqlite'), query: accepted.delivery_id,
+    secretFile: f.path('secret.key'), archives: [
+      { artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') }
+    ] });
+  assert.equal(result.archives_verified, 1);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].delivery_id, accepted.delivery_id);
+  assert.deepEqual(result.matches[0].locations.map(location => location.kind),
+    ['active_ledger', 'delivered_archive']);
+  assert.match(result.matches[0].locations[1].artifact_sha256, /^[0-9a-f]{64}$/);
+});
+
+test('History lookup finds exact delivery, event and idempotency identities without prefix matches', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 12));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const options = { source: f.path('source.sqlite'), secretFile: f.path('secret.key'), archives: [
+    { artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') }
+  ] };
+  for (const query of [accepted.delivery_id, accepted.event_id, event.key]) {
+    assert.equal((await locateHistory({ ...options, query })).matches[0].delivery_id, accepted.delivery_id);
+  }
+  assert.deepEqual((await locateHistory({ ...options, query: event.key.slice(0, -1) })).matches, []);
+});
+
+test('History lookup rejects unsigned substitutions and conflicting signed copies', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 13));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  await copyFile(f.path('archive.sqlite'), f.path('conflict.sqlite'));
+  const conflict = new DatabaseSync(f.path('conflict.sqlite'));
+  try { conflict.prepare('UPDATE events SET type = ? WHERE id = ?').run('run.conflicted', accepted.event_id); }
+  finally { conflict.close(); }
+  await createArtifactManifest({ artifact: f.path('conflict.sqlite'), output: f.path('conflict.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const base = { source: f.path('source.sqlite'), query: accepted.delivery_id, secretFile: f.path('secret.key') };
+  await assert.rejects(locateHistory({ ...base, archives: [
+    { artifact: f.path('conflict.sqlite'), manifest: f.path('archive.manifest.json') }
+  ] }), /artifact name/);
+  await assert.rejects(locateHistory({ ...base, archives: [
+    { artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') },
+    { artifact: f.path('conflict.sqlite'), manifest: f.path('conflict.manifest.json') }
+  ] }), /Conflicting history/);
+});
+
+test('History lookup validates archive pair count, limits and unique paths', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 14));
+  const base = { source: f.path('source.sqlite'), query: event.key, secretFile: f.path('secret.key') };
+  await assert.rejects(locateHistory({ ...base, archives: [] }), /1 to 20/);
+  await assert.rejects(locateHistory({ ...base, query: 'x'.repeat(257), archives: [{}] }), /1 to 20/);
+  const repeated = Array.from({ length: 21 }, (_, index) =>
+    ({ artifact: f.path('archive-' + index), manifest: f.path('manifest-' + index) }));
+  await assert.rejects(locateHistory({ ...base, archives: repeated }), /1 to 20/);
+  await assert.rejects(locateHistory({ ...base, archives: [
+    { artifact: f.path('same'), manifest: f.path('one') },
+    { artifact: f.path('same'), manifest: f.path('two') }
+  ] }), /paths must be unique/);
+});
+
+test('History lookup CLI returns verified locations and enforces paired arguments', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 15));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const args = [cli, 'locate-history', '--source', f.path('source.sqlite'), '--archive', f.path('archive.sqlite'),
+    '--archive-manifest', f.path('archive.manifest.json'), '--secret-file', f.path('secret.key'),
+    '--id', accepted.event_id];
+  const result = JSON.parse((await execute(process.execPath, args)).stdout);
+  assert.equal(result.operation, 'locate-history');
+  assert.equal(result.matches[0].locations.length, 2);
+  await assert.rejects(execute(process.execPath, args.filter((_, index) => ![6, 7].includes(index))),
+    error => error.code === 2);
+  await assert.rejects(execute(process.execPath, [...args, '--output', f.path('extra')]), error => error.code === 2);
 });
