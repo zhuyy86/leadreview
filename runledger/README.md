@@ -51,7 +51,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **63 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **70 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -128,6 +128,21 @@ The JSON result includes SHA-256, byte/page counts and snapshot row counts. The 
 An in-flight task retains its original lease and can be reclaimed after expiry; a stale token cannot complete the reclaimed task. Restored inbox entries still suppress duplicate receipts. This demonstrates recovery of the captured single-machine state. Delivered-history archiving is available as a separate read-only operation; source cleanup remains an explicit future policy.
 
 Recovery tests include uncheckpointed WAL, replay and inbox persistence, lease reclamation, a concurrent writer, competing publishers, existing-target protection, malformed databases, foreign-key corruption and the CLI round trip.
+
+### Signed offline artifact manifests
+
+Keep a high-entropy key separately from the database and its manifest:
+
+```sh
+openssl rand -out backups/manifest.key 32
+chmod 600 backups/manifest.key
+node maintenance.mjs sign-manifest --artifact backups/ledger.sqlite --output backups/ledger.manifest.json --secret-file backups/manifest.key
+node maintenance.mjs verify-manifest --artifact backups/ledger.sqlite --manifest backups/ledger.manifest.json --secret-file backups/manifest.key
+```
+
+The signed JSON binds the artifact basename, type, exact byte count, SHA-256 and inspection metadata. Backup manifests include ledger row counts. Archive manifests also include the exclusive cutoff, all table counts, identity contract and latency population definitions. Signing rechecks SQLite integrity and foreign keys, observes one stable file identity while hashing, file-syncs staging and publishes the manifest through an exclusive hard link. Verification authenticates the canonical manifest with HMAC-SHA256 before comparing the selected file and re-inspecting its schema and metadata.
+
+The secret file accepts 32–4,096 raw bytes and symbolic-link inputs are rejected. Artifact, manifest and secret identities must remain distinct, including hard-link aliases. Tests cover content and metadata edits, wrong keys, renamed-file substitution, weak keys, aliases and competing manifest publishers. HMAC is symmetric: anyone holding the key can create a valid manifest. Store the key through a separate trusted channel. The manifest authenticates integrity and provenance within that trust boundary; it provides neither encryption nor public-key attribution.
 
 
 ## Retention preview and preserved-history archive
