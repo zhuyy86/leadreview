@@ -18,13 +18,13 @@ Delivers AI job completion events and exposes retries, receiver outages and dead
 - Signs HTTP bodies with HMAC. A persistent inbox deduplicates redelivery after a lost acknowledgment; replay preserves delivery IDs and earlier attempt generations.
 - Adds persistent dispatch pause/resume and atomic batch replay with expected-generation checks, idempotent operation receipts and an audit view. Verifies competing operator processes and lost-response recovery.
 - Exposes full-ledger search, cursor pages, queue health and replay-aware p50/p95/p99 latency. WAL snapshots restore state; read-only archives preserve completed events, attempts, inbox and replay receipts in verified SQLite files.
-- Sixty-three Node.js scenarios cover recovery, archives and HTTP contracts. A 200-request local workload in batches of 20 with two workers deduplicated 100 repeats and delivered 100 unique events. Linux/Windows suites and browser checks pass in CI.
+- Sixty-three Node.js scenarios cover recovery, archives and HTTP contracts. Local exercises delivered 100 unique events from 200 requests and archived 250 of 500 delivered histories with verified receipts and checksum. Linux/Windows and browser CI pass.
 
 ## Selected Projects
 
 **[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Publishes ZIP reports exclusively and replaces KPI JSON after staging and sync. Seventy-eight tests cover rules, provenance, UI/CLI behavior, invalid KPI input and export failures.
 
-**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Commits SQLite snapshots and recoverable export intents together. Incremental CSV history, HTML and alert JSON publish from saved payloads with checksums and durable receipts. Persistent backlog age and failure state support health probes; 76 tests cover recovery and concurrent exporters.
+**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Commits SQLite snapshots and recoverable export intents together. Incremental CSV recovery hashes and writes one saved chunk at a time; HTML and alert JSON use durable receipts. Backlog age supports health probes; 78 tests cover recovery and concurrent exporters.
 
 **[LeadReview and API Contract Lab](https://github.com/zhuyy86/leadreview)** Separates AI extraction, deterministic scoring and human review. Generated n8n code is tested without module globals. HTTP/JSON/SSE regression tooling passes 18 self-tests; lead rules have 17 explicit assertions.
 
