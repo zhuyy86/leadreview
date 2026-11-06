@@ -49,7 +49,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **27 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **35 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -107,3 +107,22 @@ Open **Inspect delivery latency** in the console, or call `GET /api/metrics`. Me
 Lease-expired attempt durations include the time until reclamation; they are not a network round-trip measurement. These are single-host wall-clock observations. Negative differences are excluded and counted; positive clock adjustments cannot be detected from these timestamps. Metrics scan retained history and are intended for this local demonstration, not high-volume telemetry.
 
 The [recorded local workload](docs/verification-workload.json) contains its observation time, runtime, concurrency, sample counts and latency summaries. Reproduce with `node verify-workload.mjs`; different hosts and runs will produce different timings. The workload is a correctness and measurement exercise, not a production latency SLO or throughput benchmark.
+
+## Backup and recovery
+
+Run from this directory with Node.js 24. Both commands require a new output path:
+
+```sh
+node maintenance.mjs backup --source data/runledger.sqlite --output backups/ledger.sqlite
+node maintenance.mjs restore --source backups/ledger.sqlite --output data/recovered.sqlite
+```
+
+Backup uses Node.js's [SQLite online backup API](https://nodejs.org/download/release/v24.0.0/docs/api/sqlite.html#sqlitebackupsourceDb-path-options). A read transaction pins one committed snapshot while WAL writers continue. The resulting standalone file includes committed WAL pages, events, deliveries, leases, all replay generations and inbox receipts. Changes committed after the pinned snapshot are outside its recovery point. A long read snapshot can keep WAL pages alive until copying finishes.
+
+The tool opens the source read-only, checks SQLite integrity, required RunLedger columns and foreign keys, and validates the staged copy again. It closes the standalone copy in DELETE journal mode, syncs the file, then publishes with an exclusive hard link. Existing output files, output sidecars and source-sidecar aliases are rejected. Staging is on the destination filesystem and is removed after success or failure. Filesystems without hard-link support fail instead of falling back to partial publication. This is atomic file-name publication, not a universal power-loss durability guarantee.
+
+The JSON result includes SHA-256, byte/page counts and snapshot row counts. The checksum identifies the produced file; it is not a signature or encryption. Use trusted local snapshots and protect them like the ledger itself. No live database is replaced. To switch the demo after a restore, stop the old app and start it with `RUNLEDGER_DB` pointing to the new database, retaining the signing secret required by your receiver.
+
+An in-flight task retains its original lease and can be reclaimed after expiry; a stale token cannot complete the reclaimed task. Restored inbox entries still suppress duplicate receipts. This demonstrates recovery of the captured single-machine state, not zero data loss or exactly-once external business effects. History retention and automatic cleanup are not implemented.
+
+Recovery tests include uncheckpointed WAL, replay and inbox persistence, lease reclamation, a concurrent writer, competing publishers, existing-target protection, malformed databases, foreign-key corruption and the CLI round trip.

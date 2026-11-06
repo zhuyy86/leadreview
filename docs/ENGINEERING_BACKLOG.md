@@ -22,10 +22,10 @@ Follow-up fixes after commit `8f8e914`:
 
 ## Next priorities
 
-1. Delivery latency measurement is implemented below. Next add durable backup/restore behavior with recovery checks on a copied SQLite database.
-2. Define history retention and the effect of deletion on lifetime counts and percentile populations before adding cleanup.
-3. Review snapshot/CSV/report output boundaries in the Python tools and make partial-output failures visible and recoverable.
-4. Keep bilingual Markdown, Word and PDF exports synchronized only with verified results. The full-ledger browser scenario and current operational metrics are implemented and covered by CI.
+1. Define retained-history policy before implementing cleanup: idempotency keys, inbox receipt deduplication, replay audit history and latency sample populations must remain explicit.
+2. Review Python snapshot/CSV/report boundaries and make partial-output failures visible and recoverable.
+3. Consider a checksum manifest verification workflow for trusted offline snapshots; current maintenance output fingerprints the produced file but does not authenticate its origin.
+4. Keep bilingual exports synchronized with verified behavior. Latency measurement and new-file backup/restore are implemented below.
 
 ## Engineering target and limits
 
@@ -65,3 +65,11 @@ Base: `ed992a7`. Unrelated uncommitted edits in the original checkout were left 
 Next priorities: backup/restore validation, retained-history policy, then Python partial-output recovery. Do not repeat the implemented latency work or change the sample populations without updating their definitions and tests.
 
 Published latency implementation: [`f008936`](https://github.com/zhuyy86/leadreview/commit/f008936f22174a70e94289aefda30e434c85dd50). Its [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42132970951) passed. The [precision-regression/export checkpoint 138e8be](https://github.com/zhuyy86/leadreview/commit/138e8befb290e84896a5398f7a7c9b07c97fcba2) adds the 100-sample percentile case. Its [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42133459345) all passed. The current suite contains 27 scenarios.
+
+## 2026-11-06 WAL backup and recovery continuation
+
+Base: `3539eff`. Add `runledger/maintenance.mjs` with backup/restore CLI commands and a reusable snapshot function. The source opens read-only; a pinned read transaction captures committed WAL state while an independent writer continues. Validate schema columns, SQLite integrity and foreign keys before and after copying. Produce a standalone DELETE-journal database, file-sync it, then publish with a same-filesystem exclusive hard link. Existing targets and sidecars remain untouched; staging is removed on failure. JSON output records the snapshot checksum, size, page count and row counts.
+
+Eight recovery scenarios passed, bringing RunLedger to 35 local scenarios. They verify WAL-backed replay/history/inbox/idempotency recovery, in-flight lease reclamation and stale-token fencing, concurrent WAL writes excluded from the pinned snapshot, competing publishers, overwrite/sidecar rejection, malformed or foreign-key-invalid sources and a CLI backup/restore round trip. Preserve the existing Linux/Windows/browser CI checks and inspect their post-push result.
+
+Profile and bilingual exports are updated with the validated recovery capability; all final pages and links must be checked before publishing. Limits: point-in-time local snapshots, no in-place replacement, no encrypted/authenticated backups, no zero-loss guarantee, no history cleanup policy yet. Next implement retention design and Python output recovery rather than repeating backup or latency work.
