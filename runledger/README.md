@@ -66,6 +66,7 @@ For the browser regression, run `npm ci` and `npx playwright install chromium` f
 | --- | --- |
 | `POST /api/events` | Submit `{"type":"ai.run.completed","payload":{"run":"r-1"}}` with a unique `Idempotency-Key`. |
 | `GET /api/overview` | Read global queue counts, filtered delivery pages and receiver counters. Supports `status`, `q`, `limit` and `cursor`. |
+| `GET /api/metrics` | Read an uncached snapshot of queue health, attempt outcomes and latency populations. |
 | `GET /api/deliveries/:id` | Read the event and attempt history. |
 | `POST /api/deliveries/:id/replay` | Start a new attempt generation for a dead delivery. |
 
