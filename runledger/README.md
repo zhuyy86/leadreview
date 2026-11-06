@@ -51,7 +51,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **70 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **75 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, verified cross-file lookup, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -157,9 +157,24 @@ node verify-archive.mjs --deliveries 500
 
 Each archive preserves eligible event IDs, idempotency keys/digests, delivery rows, every attempt generation, matching inbox receipts and complete replay-operation receipts that touch an included delivery. A mixed replay receipt can therefore mention another delivery that remains source-only. Archive metadata records counts, the strict cutoff, identity contract and exact nearest-rank latency populations. The file is integrity- and foreign-key-checked, file-synced and published through an exclusive hard link; competing writers produce one winner. Legacy ledgers that predate operation receipts remain readable.
 
-The source transaction is read-only and retains every row, so duplicate submissions, receiver deduplication, live metrics and operator history continue unchanged. Archive creation currently establishes a verifiable preservation boundary; it leaves source cleanup, archive authentication/encryption and cross-file query federation as explicit later work. Logical payload bytes from the preview do not predict reclaimed SQLite file size.
+The source transaction is read-only and retains every row, so duplicate submissions, receiver deduplication, live metrics and operator history continue unchanged. Archive creation establishes a verifiable preservation boundary. Logical payload bytes from the preview do not predict reclaimed SQLite file size. Source cleanup and checkpoint policy remain separate operational work.
 
 The [recorded archive workload](docs/archive-workload.json) generated 500 completed source deliveries, including 50 dead-letter replays. Its strict midpoint cutoff archived 250 deliveries, 275 attempt generations, 63 inbox receipts and 25 replay-operation receipts. The script reopens the standalone file, checks its rows, integrity, foreign keys, metric contract and SHA-256, then confirms the source metrics and idempotent submission still match. The record contains local environment and timing scope; Linux/Windows CI runs a 100-delivery variant.
+
+### Verified cross-file history lookup
+
+Pair each archive with its signed manifest. Repeat both options in the same order for up to 20 archives:
+
+```sh
+node maintenance.mjs locate-history \
+  --source data/runledger.sqlite \
+  --archive archives/2026-10.sqlite \
+  --archive-manifest archives/2026-10.manifest.json \
+  --secret-file backups/manifest.key \
+  --id delivery-or-event-or-idempotency-key
+```
+
+The command performs exact matching on delivery ID, event ID or idempotency key. It validates the active ledger, authenticates and re-inspects every archive, observes stable artifact identity through lookup, then returns one logical match with every active/archive location. Artifact checksum and manifest creation time accompany archive locations. Identical copies merge by delivery ID; any difference in identity, type, timestamps, status, generation or attempt counters raises a conflict. Empty results still report how many archives were verified.
 
 
 ## Dispatch operations
