@@ -22,8 +22,8 @@ Follow-up fixes after commit `8f8e914`:
 
 ## Next priorities
 
-1. Define retained-history policy before implementing cleanup: idempotency keys, inbox receipt deduplication, replay audit history and latency sample populations must remain explicit.
-2. Make KPI JSON replacement recoverable on write/sync failure; the CLI ZIP publication boundary is now covered. Review PriceWatch CSV publication separately.
+1. Define an archive/aggregation contract before enabling cleanup. Read-only retention candidate accounting is implemented; idempotency keys, inbox receipts, replay history and latency sample populations must remain explicit.
+2. Review PriceWatch CSV/output publication and its relationship to committed SQLite snapshots. OrderCheck ZIP publication and KPI JSON replacement are now covered.
 3. Consider a checksum manifest verification workflow for trusted offline snapshots; current maintenance output fingerprints the produced file but does not authenticate its origin.
 4. Keep bilingual exports synchronized with verified behavior. Latency measurement and new-file backup/restore are implemented below.
 
@@ -84,3 +84,15 @@ Review found that direct exclusive writing prevented overwrites but could leave 
 All 74 tests passed locally on Linux / Python 3.12, including four new publication regressions and the existing CLI ZIP round trip. [GitHub CI](https://github.com/zhuyy86/ordercheck/actions/runs/42135404906) passed all 74 tests for this commit. Scope: CLI ZIP outputs only; KPI JSON replacement remains a separate recovery task. Unsupported hard-link filesystems fail closed; abrupt process termination may leave a staging file; no whole-directory fsync or universal power-loss guarantee.
 
 Bilingual Markdown, Word and PDF exports now include the verified report-publication behavior and 74-test count. Both final PDFs were visually reviewed at one page each; all six hyperlink destinations in each were verified. Leave the original checkout edits untouched. Resume from retained-history semantics and KPI JSON publication, not completed latency, backup or CLI ZIP work.
+
+
+## 2026-11-06 retention preview and KPI recovery
+
+Base: `e3e9bfb`. Rechecked remote main for all three repositories before editing; no newer changes were present. Original uncommitted LeadReview documentation was left untouched.
+
+- Add a read-only `retention-plan --source ... --before epoch_milliseconds` maintenance command. A single read transaction inspects the schema/integrity and reports candidate delivered records, attempt counts and logical UTF-8 payload bytes. Eligibility uses successful current-generation completion strictly before the cutoff. Recent replay, unfinished/missing history and all queued/in-flight/dead work are protected. All idempotency identities/digests and inbox receipts must be retained. No deletion or automatic cleanup is enabled.
+- Five new scenarios verify protected states, no WAL writes, unchanged metrics/idempotency/inbox behavior, replay cutoff boundaries, empty populations, multibyte payload size and actual CLI validation. RunLedger now passes 40 scenarios locally on Node.js 24.22.1.
+- [OrderCheck KPI recovery 63a64ba](https://github.com/zhuyy86/ordercheck/commit/63a64bae66c7d9376f8a8435a0ff790eb49f71bf) stages and syncs a complete JSON file before atomic replacement. Ordinary write/sync/replace failure preserves existing output and cleans staging. Reject input CSV aliases as output. Four added regressions cover faults/retry, alias protection and competing writers. All 78 tests passed locally on Linux / Python 3.12; a real subprocess round trip verified Chinese store names and a Decimal total of 0.30.
+- Profile, bilingual Markdown and Word/PDF exports include these verified changes. Each final PDF was rendered and visually checked at one page, with six verified hyperlink targets. Post-push CI results must be recorded below.
+
+Limits: retention is a preview, not archiving or cleanup. Attempt removal would change exact metrics and needs an explicit archive/aggregation design first. Payload bytes are logical size, not freed disk capacity. KPI concurrent replacement is last-successful-writer-wins, without revision conflict detection. Abrupt termination can leave staging files; no universal power-loss durability promise. Next prioritize PriceWatch publication consistency, then a preserved-history archive design.

@@ -38,6 +38,55 @@ async function hashFile(path) {
   return hash.digest('hex');
 }
 
+export async function planRetention({ source, before }) {
+  if (typeof source !== 'string' || !source || !Number.isSafeInteger(before) ||
+      before < 0 || before > 8640000000000000) {
+    throw new TypeError('Provide a source path and a valid epoch-millisecond cutoff.');
+  }
+  source = resolve(source);
+  if (!(await stat(source)).isFile()) throw new Error('Source must be an existing database file.');
+  const db = new DatabaseSync(source, { readOnly: true, timeout: 4000 });
+  try {
+    db.exec('BEGIN');
+    const counts = inspect(db);
+    // Completion age, not event age: a recent replay must not look expired.
+    // Unfinished history is excluded even if the current status says delivered.
+    const candidate = db.prepare(`
+      WITH eligible AS (
+        SELECT d.id, e.payload FROM deliveries d JOIN events e ON e.id = d.event_id
+        WHERE d.status = 'delivered'
+          AND (SELECT max(a.finished_at) FROM attempts a WHERE a.delivery_id = d.id
+            AND a.generation = d.generation AND a.outcome = 'delivered') < ?
+          AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.delivery_id = d.id AND a.finished_at IS NULL)
+      )
+      SELECT count(*) AS deliveries,
+        coalesce(sum(length(CAST(payload AS BLOB))), 0) AS payload_bytes,
+        (SELECT count(*) FROM attempts a JOIN eligible e ON e.id = a.delivery_id) AS attempts
+      FROM eligible
+    `).get(before);
+    const protectedDeliveries = Object.fromEntries(db.prepare(`
+      SELECT status, count(*) AS count FROM deliveries WHERE status != 'delivered' GROUP BY status
+    `).all().map(row => [row.status, row.count]));
+    db.exec('COMMIT');
+    return {
+      source, before_ms: before, mode: 'preview_only',
+      candidates: { ...candidate },
+      retained: { idempotency_keys: counts.events, inbox_receipts: counts.inbox,
+        deliveries_not_eligible: counts.deliveries - candidate.deliveries,
+        non_delivered: { queued: 0, in_flight: 0, dead: 0, ...protectedDeliveries } },
+      deletion_enabled: false,
+      constraints: [
+        'Keep event identities, digests and idempotency keys; keep receiver inbox receipts.',
+        'Keep queued, in-flight and dead-letter payloads and all their replay history.',
+        'Candidate attempts still feed exact latency and outcome metrics; archive or aggregate before deleting.',
+        'Payload bytes are logical UTF-8 sizes, not SQLite disk-space savings.'
+      ]
+    };
+  } finally {
+    db.close();
+  }
+}
+
 export async function snapshotLedger({ source, output, onProgress }) {
   if (typeof source !== 'string' || !source || typeof output !== 'string' || !output) {
     throw new TypeError('Provide source and output file paths.');
@@ -99,15 +148,24 @@ export async function main(argv = process.argv.slice(2)) {
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true,
-      options: { source: { type: 'string' }, output: { type: 'string' } } });
-    if (parsed.positionals.length !== 1 || !['backup', 'restore'].includes(parsed.positionals[0]) ||
-        !parsed.values.source || !parsed.values.output) throw new Error();
+      options: { source: { type: 'string' }, output: { type: 'string' }, before: { type: 'string' } } });
+    const operation = parsed.positionals[0];
+    if (parsed.positionals.length !== 1 || !parsed.values.source) throw new Error();
+    if (operation === 'retention-plan') {
+      if (parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
+          Number(parsed.values.before) > 8640000000000000) throw new Error();
+    } else if (!['backup', 'restore'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined) {
+      throw new Error();
+    }
   } catch {
     console.error('Usage: node maintenance.mjs backup|restore --source ledger.sqlite --output new.sqlite');
+    console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
     return 2;
   }
   try {
-    const result = await snapshotLedger(parsed.values);
+    const result = parsed.positionals[0] === 'retention-plan'
+      ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
+      : await snapshotLedger(parsed.values);
     console.log(JSON.stringify({ operation: parsed.positionals[0], ...result }, null, 2));
     return 0;
   } catch (error) {

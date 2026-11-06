@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { snapshotLedger } from '../maintenance.mjs';
+import { planRetention, snapshotLedger } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
 const execute = promisify(execFile);
@@ -157,4 +157,85 @@ test('CLI backup and restore return verifiable JSON while invalid arguments retu
   assert.equal(JSON.parse(second.stdout).counts.events, 1);
   assert.equal(f.open('recovered.sqlite').overview().stats.queued, 1);
   await assert.rejects(execute(process.execPath, [cli, 'restore']), error => error.code === 2 && error.stderr.includes('Usage:'));
+});
+
+test('Retention preview protects active/dead work, idempotency and inbox without modifying the ledger', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const first = source.ingest(event, 1000);
+  source.finish(source.claim(1000), { outcome: 'delivered', httpStatus: 200 }, 1010);
+  source.receive(first.delivery_id, 1011);
+  source.ingest({ ...event, key: 'dead' }, 1100);
+  source.finish(source.claim(1100), { outcome: 'dead' }, 1110);
+  source.ingest({ ...event, key: 'flight' }, 1200);
+  source.claim(1200);
+  source.ingest({ ...event, key: 'queued' }, 1300);
+  const before = source.metrics(1400);
+  const wal = await readFile(f.path('source.sqlite-wal'));
+  const plan = await planRetention({ source: f.path('source.sqlite'), before: 1400 });
+  assert.deepEqual(plan.candidates, { deliveries: 1, payload_bytes: Buffer.byteLength(JSON.stringify(event.payload)), attempts: 1 });
+  assert.deepEqual(plan.retained, { idempotency_keys: 4, inbox_receipts: 1, deliveries_not_eligible: 3,
+    non_delivered: { queued: 1, in_flight: 1, dead: 1 } });
+  assert.equal(plan.deletion_enabled, false);
+  assert.deepEqual(source.metrics(1400), before);
+  assert.deepEqual(await readFile(f.path('source.sqlite-wal')), wal);
+  assert.equal(source.ingest(event, 1500).duplicate, true);
+  assert.equal(source.receive(first.delivery_id, 1501).duplicate, true);
+});
+
+test('Retention cutoff uses successful current-generation completion, with a strict boundary', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const first = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'dead' }, 110);
+  source.replay(first.delivery_id, 1000);
+  source.finish(source.claim(1000), { outcome: 'delivered' }, 1010);
+  assert.equal((await planRetention({ source: f.path('source.sqlite'), before: 500 })).candidates.deliveries, 0);
+  assert.equal((await planRetention({ source: f.path('source.sqlite'), before: 1010 })).candidates.deliveries, 0);
+  assert.deepEqual((await planRetention({ source: f.path('source.sqlite'), before: 1011 })).candidates,
+    { deliveries: 1, payload_bytes: Buffer.byteLength(JSON.stringify(event.payload)), attempts: 2 });
+});
+
+test('Retention excludes unfinished or missing completion history despite a delivered status', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const raw = new DatabaseSync(f.path('source.sqlite'));
+  try {
+    raw.exec('UPDATE attempts SET finished_at = NULL');
+    assert.equal((await planRetention({ source: f.path('source.sqlite'), before: 1000 })).candidates.deliveries, 0);
+    raw.exec('DELETE FROM attempts');
+    assert.equal((await planRetention({ source: f.path('source.sqlite'), before: 1000 })).candidates.deliveries, 0);
+  } finally { raw.close(); }
+});
+
+test('Retention empty populations are zero and payload size counts UTF-8 bytes', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  assert.deepEqual((await planRetention({ source: f.path('source.sqlite'), before: 1000 })).candidates,
+    { deliveries: 0, payload_bytes: 0, attempts: 0 });
+  const payload = { message: '完成 🚀' };
+  source.ingest({ ...event, payload }, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  assert.equal((await planRetention({ source: f.path('source.sqlite'), before: 1000 })).candidates.payload_bytes,
+    Buffer.byteLength(JSON.stringify(payload)));
+});
+
+test('Retention CLI returns a read-only plan and rejects ambiguous or invalid flags', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event, 100);
+  const args = [cli, 'retention-plan', '--source', f.path('source.sqlite'), '--before', '1000'];
+  const result = JSON.parse((await execute(process.execPath, args)).stdout);
+  assert.equal(result.operation, 'retention-plan');
+  assert.equal(result.mode, 'preview_only');
+  assert.equal(result.retained.non_delivered.queued, 1);
+  for (const value of ['NaN', '-1', '1.5', '8640000000000001', '']) {
+    await assert.rejects(execute(process.execPath, [...args.slice(0, -1), value]), e => e.code === 2);
+  }
+  await assert.rejects(execute(process.execPath, [...args, '--output', f.path('unexpected.sqlite')]), e => e.code === 2);
+  await assert.rejects(execute(process.execPath, [cli, 'backup', '--source', f.path('source.sqlite'),
+    '--output', f.path('backup.sqlite'), '--before', '1000']), e => e.code === 2);
+  await assert.rejects(planRetention({ source: f.path('source.sqlite'), before: 1.5 }), /cutoff/);
+  await assert.rejects(stat(f.path('unexpected.sqlite')), { code: 'ENOENT' });
 });
