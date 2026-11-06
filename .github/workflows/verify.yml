@@ -43,4 +43,15 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - name: Exercise console and viewport behavior
+        env:
+          RUNLEDGER_SCREENSHOT: artifacts/runledger-desktop.png
+          RUNLEDGER_MOBILE_SCREENSHOT: artifacts/runledger-mobile.png
+          RUNLEDGER_REPLAY_SCREENSHOT: artifacts/runledger-replay-mobile.png
         run: node scripts/verify_runledger_browser.mjs
+      - name: Save verified console screenshots
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runledger-console
+          path: artifacts/*.png
+          if-no-files-found: error
+          retention-days: 7

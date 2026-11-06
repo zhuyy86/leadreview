@@ -14,17 +14,17 @@ Independent project · Node.js 24 · SQLite · Browser console · Nov 2026 · [S
 
 Delivers AI job completion events and exposes retries, receiver outages and dead-letter recovery in an operator console.
 
-- Commits each event and delivery together. Canonical payloads deduplicate under a stable idempotency key; changed payloads return HTTP 409. WAL-aware backups restore queue history and leases to fresh files without overwriting existing data.
-- Claims tasks with expiring leases and fences stale worker completions. Retries transient failures with jitter and respects the receiver's Retry-After minimum; replay preserves identity and attempt generations.
-- Signs raw messages with HMAC and uses a persistent receiver inbox to deduplicate receipts under at-least-once delivery. Verified redelivery after a lost acknowledgment and restart.
-- Adds whole-ledger status/search, cursor pagination and read-transaction metrics for queue health and replay-aware p50/p95/p99 latency. A read-only retention preview protects replay and deduplication boundaries. Forty Node.js scenarios verify these behaviors.
-- Reproduced two-process claim competition and worker termination. Sent 200 local requests in batches of 20 with two workers: 100 repeats deduplicated, 100 unique events delivered and 100 inbox receipts. Linux/Windows and browser checks run in CI.
+- Commits events and queue records together. Canonical payloads deduplicate by idempotency key; conflicts return HTTP 409. Expiring leases fence stale worker completions.
+- Signs HTTP bodies with HMAC. A persistent inbox deduplicates redelivery after a lost acknowledgment; replay preserves delivery IDs and earlier attempt generations.
+- Adds persistent dispatch pause/resume and atomic batch replay with expected-generation checks, idempotent operation receipts and an audit view. Verifies competing operator processes and lost-response recovery.
+- Exposes full-ledger search, cursor pages, queue health and replay-aware p50/p95/p99 latency. WAL-aware snapshots restore queue state, operator controls and receipts to fresh files.
+- Fifty-seven Node.js scenarios cover recovery and HTTP contracts. A 200-request local workload in batches of 20 with two workers deduplicated 100 repeats and delivered 100 unique events. Linux/Windows suites and browser checks pass in CI.
 
 ## Selected Projects
 
 **[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Publishes ZIP reports exclusively and replaces KPI JSON after staging and sync. Seventy-eight tests cover rules, provenance, UI/CLI behavior, invalid KPI input and export failures.
 
-**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Serializes predecessor lookup and snapshot commit in SQLite. Validates complete alert policies before network or output side effects. Fifty-three tests include competing writers, rollback and CLI failures.
+**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Commits SQLite snapshots and recoverable export intents together. Incremental CSV history, HTML and alert JSON publish from saved payloads with checksums and durable receipts. Seventy-two tests include process exit, concurrent exporters and two HTTP/CLI runs.
 
 **[LeadReview and API Contract Lab](https://github.com/zhuyy86/leadreview)** Separates AI extraction, deterministic scoring and human review. Generated n8n code is tested without module globals. HTTP/JSON/SSE regression tooling passes 18 self-tests; lead rules have 17 explicit assertions.
 

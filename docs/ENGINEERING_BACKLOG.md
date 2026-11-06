@@ -23,7 +23,7 @@ Follow-up fixes after commit `8f8e914`:
 ## Next priorities
 
 1. Define an archive/aggregation contract before enabling cleanup. Read-only retention candidate accounting is implemented; idempotency keys, inbox receipts, replay history and latency sample populations must remain explicit.
-2. Review PriceWatch CSV/output publication and its relationship to committed SQLite snapshots. OrderCheck ZIP publication and KPI JSON replacement are now covered.
+2. Extend monitoring of export backlog/age and define a payload-retention policy. PriceWatch transactional export recovery, OrderCheck ZIP publication and KPI JSON replacement are implemented.
 3. Consider a checksum manifest verification workflow for trusted offline snapshots; current maintenance output fingerprints the produced file but does not authenticate its origin.
 4. Keep bilingual exports synchronized with verified behavior. Latency measurement and new-file backup/restore are implemented below.
 
@@ -115,3 +115,14 @@ Next in this active delivery: audited, idempotent batch dead-letter replay, then
 Dispatch checkpoint: [`ec91075`](https://github.com/zhuyy86/leadreview/commit/ec910758ac88df032e54eb691bf49973f624e85c). [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42181098299) passed.
 
 Add all-or-nothing batch replay with expected-generation checks, canonical target identity, idempotent operation keys and durable audit receipts. The console supports selection across pages, tab-session recovery after an acknowledgment loss, retrying the recorded operation and viewing recent replay actions. Eight added Node.js scenarios verify atomic selection conflicts, rollback after a trigger interrupts the second update, two real operator processes competing under one key, completed-delivery retries, restart and backup persistence, limits and HTTP contracts. The full local suite now passes 57 scenarios. The browser regression adds a two-record batch whose first response is deliberately lost, reloads the page and retries the same saved key, then checks one action, one generation transition per target and the mobile audit view. Post-push CI and final bilingual exports follow this checkpoint.
+
+
+Batch replay checkpoint: [`db55430`](https://github.com/zhuyy86/leadreview/commit/db55430b44b3c4a94e752ee94ef0ed89054fba5c). [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42181955582) passed. Both browser scenarios cover pause/reload/replay/resume and a lost batch acknowledgment followed by tab reload, same-key retry and audit inspection at a mobile viewport. Final profile and resume sources reflect 57 RunLedger scenarios, 78 OrderCheck tests and 72 PriceWatch tests. Both final Word exports were rendered to PDF and visually reviewed. English and Chinese each retain one page and six verified hyperlink targets.
+
+
+Current continuation priorities: add export backlog age/health reporting, design archive/retention semantics that retain replay/idempotency receipts, and measure larger recovery workloads with explicit local scope. Completed in this delivery: PriceWatch transactional export recovery, persistent dispatch controls, audited atomic batch replay and their HTTP/browser recovery paths. Existing licenses and source attribution remain present.
+
+
+[PriceWatch workload 9c8336b](https://github.com/zhuyy86/pricewatch/commit/9c8336b4f8ed752260b4df724e1677cedf0cd916) adds a reproducible 500-snapshot / 20-product local exercise: 1,500 export intents, 10,000 CSV rows, zero duplicate contributions after an interrupted publication receipt, and 868,216 bytes for both the final CSV and its stored incremental payloads. Two bounded recovery passes drain the backlog. The timestamped report is in `pricewatch/docs/recovery-workload.json`; CI runs a 20-snapshot variant. Windows completed all functional assertions but exposed a verification connection still holding the temporary database at cleanup. [Explicit-close fix c0e0d39](https://github.com/zhuyy86/pricewatch/commit/c0e0d39b9bfef0385f2633a20f2051eaa6912d7e) addresses that resource lifetime; inspect its final CI.
+
+Add pinned screenshot artifact capture for desktop, mobile and recovered batch-audit views to the existing browser CI. Profile and bilingual exports are synchronized; visual and hyperlink checks are complete for both one-page PDFs. Confirm the new CI and inspect the captured console views before recording the final handoff.

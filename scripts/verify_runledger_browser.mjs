@@ -183,6 +183,11 @@ test('Browser recovers a lost batch-replay acknowledgment through its saved oper
     await page.locator('#operator-audit > summary').click();
     await page.waitForFunction(() => document.querySelector('#action-rows').textContent.includes('2 replay(s)'));
     assert.equal(await page.locator('#action-rows code').textContent(), app.store.operatorActions()[0].id);
+    if (process.env.RUNLEDGER_REPLAY_SCREENSHOT) {
+      const path = resolve(process.env.RUNLEDGER_REPLAY_SCREENSHOT);
+      await mkdir(dirname(path), { recursive: true });
+      await page.screenshot({ path, fullPage: true });
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(errors, []);
   } finally {
