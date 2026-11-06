@@ -107,6 +107,10 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
     await page.locator('#latency-refresh').click();
     await page.waitForFunction(() => !document.querySelector('#latency-refresh').disabled);
 
+    // Focus the showcase on the recovered event while metrics retain the full population.
+    await page.locator('#search').fill(old.event_id);
+    await count('1 matching');
+
     if (process.env.RUNLEDGER_SCREENSHOT) {
       const path = resolve(process.env.RUNLEDGER_SCREENSHOT);
       await mkdir(dirname(path), { recursive: true });
