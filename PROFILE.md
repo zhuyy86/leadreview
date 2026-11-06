@@ -31,7 +31,7 @@ WAL-aware online backups pin a committed read snapshot while writers continue. R
 
 | Project | Design and verification |
 | --- | --- |
-| [OrderCheck](https://github.com/zhuyy86/ordercheck) | Preserves decimal money values and isolates entire groups of conflicting records. One processing core powers the CLI and Streamlit review screen. 70 tests and a seven-sheet audit workbook, including invalid KPI inputs. |
+| [OrderCheck](https://github.com/zhuyy86/ordercheck) | Preserves decimal money values and isolates entire groups of conflicting records. One processing core powers the CLI and Streamlit review screen. 74 tests and a seven-sheet audit workbook. CLI reports publish complete staged files exclusively, with failure/retry and competing-writer coverage. |
 | [LeadReview](README.md#lead-intake--decision-workflow) | Separates model extraction from deterministic scoring and human approval. The workflow records why a lead was scored and distinguishes a proposed action from the action eligible to execute. |
 | [API Contract Lab](tools/API_CONTRACT_LAB.md) | Reproduces malformed JSON, incomplete server-sent event streams, and timeouts against a local HTTP fixture. The test runner records which part of the response contract failed. |
 | [PriceWatch](https://github.com/zhuyy86/pricewatch) | Serializes snapshot comparison and commit in SQLite. Validates complete alert policies before scraping or output. 53 tests cover snapshots, rollback, alerts and CLI failures. |

@@ -22,7 +22,7 @@ Delivers AI job completion events and exposes retries, receiver outages and dead
 
 ## Selected Projects
 
-**[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Seventy tests cover rules, provenance, UI/CLI behavior and malformed KPI input.
+**[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Publishes complete CLI reports without overwriting existing files. Seventy-four tests cover rules, provenance, UI/CLI behavior, invalid KPI input and export failures.
 
 **[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Serializes predecessor lookup and snapshot commit in SQLite. Validates complete alert policies before network or output side effects. Fifty-three tests include competing writers, rollback and CLI failures.
 

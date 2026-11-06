@@ -23,7 +23,7 @@ Follow-up fixes after commit `8f8e914`:
 ## Next priorities
 
 1. Define retained-history policy before implementing cleanup: idempotency keys, inbox receipt deduplication, replay audit history and latency sample populations must remain explicit.
-2. Review Python snapshot/CSV/report boundaries and make partial-output failures visible and recoverable.
+2. Make KPI JSON replacement recoverable on write/sync failure; the CLI ZIP publication boundary is now covered. Review PriceWatch CSV publication separately.
 3. Consider a checksum manifest verification workflow for trusted offline snapshots; current maintenance output fingerprints the produced file but does not authenticate its origin.
 4. Keep bilingual exports synchronized with verified behavior. Latency measurement and new-file backup/restore are implemented below.
 
@@ -72,4 +72,15 @@ Base: `3539eff`. Add `runledger/maintenance.mjs` with backup/restore CLI command
 
 Eight recovery scenarios passed, bringing RunLedger to 35 local scenarios. They verify WAL-backed replay/history/inbox/idempotency recovery, in-flight lease reclamation and stale-token fencing, concurrent WAL writes excluded from the pinned snapshot, competing publishers, overwrite/sidecar rejection, malformed or foreign-key-invalid sources and a CLI backup/restore round trip. Preserve the existing Linux/Windows/browser CI checks and inspect their post-push result.
 
-Profile and bilingual exports are updated with the validated recovery capability; all final pages and links must be checked before publishing. Limits: point-in-time local snapshots, no in-place replacement, no encrypted/authenticated backups, no zero-loss guarantee, no history cleanup policy yet. Next implement retention design and Python output recovery rather than repeating backup or latency work.
+Profile and bilingual exports are updated with the validated recovery capability; both languages rendered to one page with six verified hyperlink targets each. Limits: point-in-time local snapshots, no in-place replacement, no encrypted/authenticated backups, no zero-loss guarantee, no history cleanup policy yet. Next implement retention design and Python output recovery rather than repeating backup or latency work.
+
+
+Published recovery implementation: [`f6b17c0`](https://github.com/zhuyy86/leadreview/commit/f6b17c0b652d8260fa17ea3d1b25ba099557f7c4). Its [Linux, Windows and browser CI](https://github.com/zhuyy86/leadreview/actions/runs/42135095677) all passed.
+
+## 2026-11-06 OrderCheck report publication continuation
+
+Review found that direct exclusive writing prevented overwrites but could leave a partial final ZIP after disk-write failure, blocking a same-name retry. [OrderCheck b648294](https://github.com/zhuyy86/ordercheck/commit/b64829493a5176e868b68b64238651cd8b76f076) now stages in the target directory, flushes and file-syncs the complete bytes, then publishes with an exclusive hard link. Cleanup runs on ordinary write/sync/publication failure. Existing reports and dangling symlinks are preserved, and competing writers cannot mix or overwrite payloads.
+
+All 74 tests passed locally on Linux / Python 3.12, including four new publication regressions and the existing CLI ZIP round trip. [GitHub CI](https://github.com/zhuyy86/ordercheck/actions/runs/42135404906) passed all 74 tests for this commit. Scope: CLI ZIP outputs only; KPI JSON replacement remains a separate recovery task. Unsupported hard-link filesystems fail closed; abrupt process termination may leave a staging file; no whole-directory fsync or universal power-loss guarantee.
+
+Bilingual Markdown, Word and PDF exports now include the verified report-publication behavior and 74-test count. Both final PDFs were visually reviewed at one page each; all six hyperlink destinations in each were verified. Leave the original checkout edits untouched. Resume from retained-history semantics and KPI JSON publication, not completed latency, backup or CLI ZIP work.

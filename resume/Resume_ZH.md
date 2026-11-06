@@ -22,7 +22,7 @@
 
 ## 其他工程作品
 
-**[OrderCheck 订单数据质量工作台](https://github.com/zhuyy86/ordercheck)** 以 Decimal 校验金额，整组隔离订单冲突，导出七工作表审计报告。70 项测试覆盖规则、来源追溯、UI/CLI 和 KPI 异常输入。
+**[OrderCheck 订单数据质量工作台](https://github.com/zhuyy86/ordercheck)** 以 Decimal 校验金额，整组隔离订单冲突，导出七工作表审计报告。CLI 完整暂存后独占发布，写入失败可重试且不覆盖旧报告。74 项测试覆盖规则、来源追溯、UI/CLI、KPI 异常与导出故障。
 
 **[PriceWatch 历史价格监测](https://github.com/zhuyy86/pricewatch)** 在 SQLite 中串行执行前驱读取与快照提交；抓取和写入前校验全部告警规则。53 项测试包含竞争写入、事务回滚和 CLI 错误处理。
 
