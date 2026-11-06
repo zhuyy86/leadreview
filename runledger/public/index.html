@@ -104,6 +104,10 @@
           <span>Oldest due <b id="oldest-due">—</b></span>
           <span>Expired leases <b id="expired-leases">—</b></span>
         </div>
+        <div class="dispatch-controls" aria-label="Dispatch control">
+          <div><strong id="dispatch-state" role="status">Loading dispatch…</strong><p id="dispatch-hint">Reading saved worker control.</p></div>
+          <button id="dispatch-toggle" type="button" class="button secondary" disabled>Pause dispatch</button>
+        </div>
         <details id="latency-summary" class="latency-summary">
           <summary>Inspect delivery latency</summary>
           <p>Milliseconds, p50 / p95 / p99. Event age includes replay waiting; generation time starts at its first claim.</p>

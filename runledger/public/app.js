@@ -62,6 +62,7 @@ function time(value, formatter = clock) {
 
 function updateControls() {
   seedButton.disabled = !online || busy;
+  select('#dispatch-toggle').disabled = !online || busy || !overview?.dispatch;
   for (const button of modeButtons) button.disabled = !online || busy;
   const replayButton = select('#replay');
   if (replayButton) replayButton.disabled = !online || busy;
@@ -105,6 +106,12 @@ function renderOverview() {
   select('#oldest-due').textContent = `${(health.oldest_due_age_ms / 1000).toFixed(1)}s`;
   select('#expired-leases').textContent = number.format(health.expired_leases);
   select('#expired-leases').classList.toggle('warning', health.expired_leases > 0);
+  const paused = overview.dispatch.paused;
+  select('#dispatch-state').textContent = paused ? 'Dispatch paused' : 'Dispatch running';
+  select('#dispatch-hint').textContent = paused
+    ? 'Events continue to queue. Resume when the receiver is ready.'
+    : 'Workers claim due events. Current requests finish when dispatch pauses.';
+  select('#dispatch-toggle').textContent = paused ? 'Resume dispatch' : 'Pause dispatch';
   const current = modes[overview.receiver.mode];
   receiverMode.className = `status-pill ${current.color}`;
   receiverMode.replaceChildren(element('span', 'dot'), ` ${current.label}`);
@@ -311,6 +318,12 @@ seedButton.addEventListener('click', () => mutate('/api/demo/seed', undefined, r
   choose(result.delivery_id);
   return 'AI completion event queued. Watch its attempts in the timeline.';
 }));
+
+select('#dispatch-toggle').addEventListener('click', () => {
+  const paused = !overview.dispatch.paused;
+  void mutate('/api/dispatch', { paused, expected_revision: overview.dispatch.revision },
+    () => paused ? 'Dispatch paused. Incoming events remain queued.' : 'Dispatch resumed. Workers can claim due events.');
+});
 
 for (const button of filterButtons) {
   button.addEventListener('click', () => {

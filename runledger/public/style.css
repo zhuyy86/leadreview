@@ -216,3 +216,9 @@ tr[data-delivery].selected td:first-child { box-shadow: inset 3px 0 var(--purple
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0s !important; scroll-behavior: auto !important; }
 }
+
+.dispatch-controls { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.4rem; border-top: 1px solid var(--line, #e8e8ef); }
+.dispatch-controls strong { font-size: .85rem; }
+.dispatch-controls p { color: #6b7080; font-size: .8rem; margin: .35rem 0 0; max-width: 30rem; }
+.dispatch-controls button { flex-shrink: 0; }
+@media (max-width: 560px) { .dispatch-controls { align-items: stretch; flex-direction: column; padding: 1rem; } }

@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-11-05T23:52:07.011Z",
+  "observedAt": "2026-11-06T07:26:13.804Z",
   "node": "v24.22.1",
   "platform": "linux",
   "requests": 200,
@@ -9,36 +9,36 @@
   "delivered": 100,
   "processedByReceiver": 100,
   "duplicateReceiverEffects": 0,
-  "elapsedMs": 392,
+  "elapsedMs": 389,
   "latencyMs": {
     "attempt": {
       "sample_count": 100,
       "invalid_sample_count": 0,
       "min_ms": 1,
-      "mean_ms": 5.89,
-      "max_ms": 32,
+      "mean_ms": 5.65,
+      "max_ms": 33,
       "p50_ms": 3,
-      "p95_ms": 23,
+      "p95_ms": 18,
       "p99_ms": 32
     },
     "event_to_delivery": {
       "sample_count": 100,
       "invalid_sample_count": 0,
-      "min_ms": 53,
-      "mean_ms": 147.16,
-      "max_ms": 194,
-      "p50_ms": 164,
-      "p95_ms": 189,
-      "p99_ms": 192
+      "min_ms": 60,
+      "mean_ms": 144.86,
+      "max_ms": 188,
+      "p50_ms": 163,
+      "p95_ms": 184,
+      "p99_ms": 187
     },
     "generation_to_delivery": {
       "sample_count": 100,
       "invalid_sample_count": 0,
       "min_ms": 1,
-      "mean_ms": 5.89,
-      "max_ms": 32,
+      "mean_ms": 5.65,
+      "max_ms": 33,
       "p50_ms": 3,
-      "p95_ms": 23,
+      "p95_ms": 18,
       "p99_ms": 32
     }
   },

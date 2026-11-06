@@ -15,12 +15,14 @@ const requiredColumns = {
   receiver: ['id', 'mode', 'duplicates'],
   transient_failures: ['delivery_id']
 };
+const optionalColumns = { dispatch_control: ['id', 'paused', 'revision', 'updated_at'] };
 
 function inspect(db) {
   const check = db.prepare('PRAGMA quick_check(1)').get();
   if (Object.values(check)[0] !== 'ok') throw new Error('SQLite integrity check failed.');
-  for (const [table, columns] of Object.entries(requiredColumns)) {
+  for (const [table, columns] of Object.entries({ ...requiredColumns, ...optionalColumns })) {
     const definition = db.prepare("SELECT type FROM sqlite_schema WHERE name = ?").get(table);
+    if (!definition && table in optionalColumns) continue;
     const found = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
     if (definition?.type !== 'table' || columns.some(column => !found.has(column))) {
       throw new Error('Not a compatible RunLedger database: ' + table);

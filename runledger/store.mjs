@@ -101,6 +101,13 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     CREATE TABLE IF NOT EXISTS transient_failures (
       delivery_id TEXT PRIMARY KEY
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS dispatch_control (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+      revision INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+    INSERT OR IGNORE INTO dispatch_control VALUES (1, 0, 0, 0);
   `);
 
   function transaction(callback, write = true) {
@@ -146,6 +153,7 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
 
   function claim(now = Date.now()) {
     return transaction(() => {
+      if (dispatchStatus().paused) return null;
       db.prepare(`
         UPDATE attempts SET finished_at = ?, outcome = 'lease_expired', error = 'Worker lease expired'
         WHERE token IN (SELECT lease_token FROM deliveries WHERE status = 'in_flight' AND lease_until <= ?)
@@ -201,6 +209,28 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
       if (!db.prepare('SELECT 1 FROM deliveries WHERE id = ?').get(id)) throw new DomainError(404, 'Delivery not found.');
       throw new DomainError(409, 'Only dead deliveries can be replayed.');
     }
+  }
+
+  function dispatchStatus() {
+    const row = db.prepare('SELECT paused, revision, updated_at FROM dispatch_control WHERE id = 1').get();
+    return { ...row, paused: Boolean(row.paused) };
+  }
+
+  function setDispatch({ paused, expected_revision }, now = Date.now()) {
+    if (typeof paused !== 'boolean' || !Number.isSafeInteger(expected_revision) || expected_revision < 0) {
+      throw new DomainError(400, 'Provide paused as a boolean and the current expected_revision.');
+    }
+    return transaction(() => {
+      const current = dispatchStatus();
+      if (current.revision !== expected_revision) {
+        throw new DomainError(409, 'Dispatch changed in another session. Refresh its current revision.');
+      }
+      if (current.paused !== paused) {
+        db.prepare('UPDATE dispatch_control SET paused = ?, revision = revision + 1, updated_at = ? WHERE id = 1')
+          .run(paused ? 1 : 0, now);
+      }
+      return dispatchStatus();
+    });
   }
 
   function receiverStatus() {
@@ -295,7 +325,7 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
         attempts[outcome] = count;
       }
       return { observed_at: now, deliveries: deliveryStats(), queue: queueHealth(now), attempts,
-        latency: latencyMetrics(), receiver: receiverStatus() };
+        latency: latencyMetrics(), receiver: receiverStatus(), dispatch: dispatchStatus() };
     }, false);
   }
 
@@ -333,7 +363,7 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
         v: 1, t: last.created_at, id: last.id, status, q, limit
       })).toString('base64url') : null;
       return {
-        stats, deliveries, receiver: receiverStatus(), queue_health: queueHealth(Date.now()),
+        stats, deliveries, receiver: receiverStatus(), queue_health: queueHealth(Date.now()), dispatch: dispatchStatus(),
         page: { limit, matching, has_more: hasMore, next_cursor: nextCursor }
       };
     }, false);
@@ -350,5 +380,6 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
     return { delivery, attempts };
   }
 
-  return { ingest, claim, finish, replay, overview, metrics, detail, setReceiver, receive, close: () => db.close() };
+  return { ingest, claim, finish, replay, overview, metrics, detail, setReceiver, receive,
+    dispatchStatus, setDispatch, close: () => db.close() };
 }

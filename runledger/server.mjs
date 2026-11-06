@@ -102,6 +102,14 @@ export async function startApp({
         }));
       }
       if (req.method === 'GET' && pathname === '/api/metrics') return json(res, 200, store.metrics());
+      if (req.method === 'GET' && pathname === '/api/dispatch') return json(res, 200, store.dispatchStatus());
+      if (req.method === 'POST' && pathname === '/api/dispatch') {
+        const body = await readJson(req);
+        if (Object.keys(body).some(key => !['paused', 'expected_revision'].includes(key))) {
+          throw new DomainError(400, 'Dispatch accepts paused and expected_revision.');
+        }
+        return json(res, 200, store.setDispatch(body));
+      }
       const detail = /^\/api\/deliveries\/([0-9a-f-]{36})$/.exec(pathname);
       if (req.method === 'GET' && detail) return json(res, 200, store.detail(detail[1]));
       const replay = /^\/api\/deliveries\/([0-9a-f-]{36})\/replay$/.exec(pathname);

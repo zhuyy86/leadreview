@@ -35,6 +35,12 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
       return page.locator('#rows tr').evaluateAll(rows => rows.map(row => row.dataset.delivery));
     }
     await count('131 matching');
+    await page.locator('#dispatch-toggle').click();
+    await page.waitForFunction(() => document.querySelector('#dispatch-state').textContent === 'Dispatch paused');
+    assert.equal(app.store.dispatchStatus().paused, true);
+    await page.reload();
+    await count('131 matching');
+    assert.equal(await page.locator('#dispatch-state').textContent(), 'Dispatch paused');
     const firstPage = await ids();
     assert.equal(firstPage.length, 25);
     await page.locator('#next-page').click();
@@ -80,6 +86,10 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
       receiverUrl: app.url + '/demo/receiver', secret, timeoutMs: 500, baseDelayMs: 20
     });
     await page.locator('#replay').click();
+    await page.waitForFunction(() => document.querySelector('#detail .status-pill')?.textContent.includes('Queued'));
+    assert.equal(app.store.detail(old.delivery_id).delivery.attempt_count, 0);
+    await page.locator('#dispatch-toggle').click();
+    await page.waitForFunction(() => document.querySelector('#dispatch-state').textContent === 'Dispatch running');
     await page.waitForFunction(() => document.querySelector('#detail .status-pill')?.textContent.includes('Delivered'));
     assert.equal(app.store.detail(old.delivery_id).delivery.generation, 2);
     assert.deepEqual(app.store.detail(old.delivery_id).attempts.map(row => row.outcome), ['delivered', 'dead']);
@@ -105,6 +115,7 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal(await page.locator('#next-page').isVisible(), true);
+    assert.equal(await page.locator('#dispatch-toggle').isVisible(), true);
     assert.equal(await page.locator('#due-now').textContent(), '0');
     if (process.env.RUNLEDGER_MOBILE_SCREENSHOT) {
       const path = resolve(process.env.RUNLEDGER_MOBILE_SCREENSHOT);

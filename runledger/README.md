@@ -49,7 +49,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **40 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **49 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -137,3 +137,10 @@ node maintenance.mjs retention-plan --source data/runledger.sqlite --before 1793
 `--before` is an exclusive UTC epoch-millisecond completion cutoff (the example is 2026-11-01T00:00:00Z). This read-only command reports candidate delivered records, their attempt-row count and logical UTF-8 payload bytes in one read transaction. It does not delete, archive, vacuum or rewrite the ledger. The cutoff uses the successful completion in the current generation, so a recently replayed old event is protected. Missing or unfinished attempt history is excluded. Queued, in-flight and dead-letter work remains protected.
 
 Keep all event identities, idempotency keys/digests and receiver inbox receipts regardless of age. Removing those changes duplicate-submission and duplicate-receipt behavior. Do not trim attempts until an archive/aggregation contract preserves replay evidence and defines the resulting latency/outcome sample populations. The preview quantifies candidates for that future design; it is not permission to delete them. Logical payload bytes do not predict reclaimed SQLite file size. No retention job is scheduled.
+
+
+## Dispatch operations
+
+The console can pause and resume dispatch while ingestion continues. A pause takes effect at the next transactional claim; current HTTP requests finish normally. Queued retries and replayed dead letters retain their due timestamps and generations. Expired leases remain visible during pause and are reclaimed with token fencing after resume. The control state persists across restarts and WAL backup/restore. Older databases initialize with running dispatch.
+
+`GET /api/dispatch` returns `{paused, revision, updated_at}`. `POST /api/dispatch` accepts `{paused: true, expected_revision: 0}` with `Content-Type: application/json`. Matching revisions authorize a state transition; stale revisions return HTTP 409 with a refresh instruction. Same-state requests preserve the revision. Overview and metrics include the dispatch state in their existing read transactions. The console refreshes its state after each control action.
