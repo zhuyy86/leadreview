@@ -108,6 +108,15 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
       updated_at INTEGER NOT NULL
     ) STRICT;
     INSERT OR IGNORE INTO dispatch_control VALUES (1, 0, 0, 0);
+    CREATE TABLE IF NOT EXISTS operator_actions (
+      id TEXT PRIMARY KEY,
+      operation_key TEXT NOT NULL UNIQUE,
+      digest TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind = 'replay'),
+      created_at INTEGER NOT NULL,
+      result TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS operator_actions_created ON operator_actions(created_at DESC, id DESC);
   `);
 
   function transaction(callback, write = true) {
@@ -214,6 +223,52 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
   function dispatchStatus() {
     const row = db.prepare('SELECT paused, revision, updated_at FROM dispatch_control WHERE id = 1').get();
     return { ...row, paused: Boolean(row.paused) };
+  }
+
+  function replayMany(body, now = Date.now()) {
+    const { operation_key: key, deliveries } = body ?? {};
+    if (typeof key !== 'string' || !/^[\w.-]{1,128}$/.test(key) || !Array.isArray(deliveries) ||
+        deliveries.length < 1 || deliveries.length > 50 ||
+        Object.keys(body).some(k => !['operation_key', 'deliveries'].includes(k))) {
+      throw new DomainError(400, 'Provide an operation_key and 1–50 deliveries.');
+    }
+    const targets = deliveries.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Object.keys(item).some(k => !['id', 'generation'].includes(k)) || !uuid.test(item.id) ||
+          !Number.isSafeInteger(item.generation) || item.generation < 1) {
+        throw new DomainError(400, 'Each replay target needs an ID and its expected generation.');
+      }
+      return { id: item.id, generation: item.generation };
+    }).sort((a, b) => a.id.localeCompare(b.id));
+    if (new Set(targets.map(item => item.id)).size !== targets.length) {
+      throw new DomainError(400, 'Replay targets must have distinct IDs.');
+    }
+    const digest = createHash('sha256').update(JSON.stringify(targets)).digest('hex');
+    return transaction(() => {
+      const existing = db.prepare('SELECT digest, result FROM operator_actions WHERE operation_key = ?').get(key);
+      if (existing) {
+        if (existing.digest !== digest) throw new DomainError(409, 'Operation key already identifies another replay selection.');
+        return { ...JSON.parse(existing.result), duplicate: true };
+      }
+      for (const target of targets) {
+        const current = db.prepare('SELECT status, generation FROM deliveries WHERE id = ?').get(target.id);
+        if (!current || current.status !== 'dead' || current.generation !== target.generation) {
+          throw new DomainError(409, 'Replay selection changed. Refresh delivery ' + target.id + '.');
+        }
+      }
+      for (const target of targets) replay(target.id, now);
+      const result = { action_id: randomUUID(), replayed_count: targets.length,
+        deliveries: targets.map(item => ({ id: item.id, from_generation: item.generation, to_generation: item.generation + 1 })) };
+      db.prepare("INSERT INTO operator_actions VALUES (?, ?, ?, 'replay', ?, ?)")
+        .run(result.action_id, key, digest, now, JSON.stringify(result));
+      return { ...result, duplicate: false };
+    });
+  }
+
+  function operatorActions(limit = 20) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainError(400, 'Action limit must be 1–100.');
+    return db.prepare('SELECT id, operation_key, kind, created_at, result FROM operator_actions ORDER BY created_at DESC, id DESC LIMIT ?')
+      .all(limit).map(({ result, ...row }) => ({ ...row, ...JSON.parse(result) }));
   }
 
   function setDispatch({ paused, expected_revision }, now = Date.now()) {
@@ -381,5 +436,5 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
   }
 
   return { ingest, claim, finish, replay, overview, metrics, detail, setReceiver, receive,
-    dispatchStatus, setDispatch, close: () => db.close() };
+    dispatchStatus, setDispatch, replayMany, operatorActions, close: () => db.close() };
 }

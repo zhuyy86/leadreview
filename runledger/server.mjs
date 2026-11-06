@@ -102,6 +102,18 @@ export async function startApp({
         }));
       }
       if (req.method === 'GET' && pathname === '/api/metrics') return json(res, 200, store.metrics());
+      if (req.method === 'POST' && pathname === '/api/replays') {
+        const result = store.replayMany(await readJson(req));
+        return json(res, result.duplicate ? 200 : 202, result);
+      }
+      if (req.method === 'GET' && pathname === '/api/actions') {
+        const keys = [...searchParams.keys()];
+        const limit = searchParams.get('limit') ?? '20';
+        if (keys.some(key => key !== 'limit') || keys.length > 1 || !/^[1-9]\d{0,2}$/.test(limit)) {
+          throw new DomainError(400, 'Use one action limit from 1 to 100.');
+        }
+        return json(res, 200, { actions: store.operatorActions(Number(limit)) });
+      }
       if (req.method === 'GET' && pathname === '/api/dispatch') return json(res, 200, store.dispatchStatus());
       if (req.method === 'POST' && pathname === '/api/dispatch') {
         const body = await readJson(req);

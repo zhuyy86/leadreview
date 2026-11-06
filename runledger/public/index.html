@@ -114,9 +114,15 @@
           <div id="latency-rows"></div>
           <div class="latency-controls"><button id="latency-refresh" type="button" class="button secondary">Refresh measurements</button><span id="latency-status" role="status">Open to measure the ledger.</span></div>
         </details>
+        <div class="replay-toolbar" aria-label="Batch replay">
+          <span id="selection-count" role="status">0 selected</span>
+          <button id="select-dead-page" type="button">Select dead letters on page</button>
+          <button id="clear-selection" type="button">Clear selection</button>
+          <button id="bulk-replay" type="button" class="button secondary" disabled>Replay selected</button>
+        </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th scope="col">Event</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th></tr></thead>
+            <thead><tr><th scope="col">Select</th><th scope="col">Event</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th></tr></thead>
             <tbody id="rows"></tbody>
           </table>
         </div>
@@ -133,6 +139,11 @@
             <button id="next-page" type="button" disabled>Next</button>
           </nav>
         </footer>
+        <details id="operator-audit" class="latency-summary">
+          <summary>Recent replay operations</summary>
+          <ol id="action-rows"></ol>
+          <button id="actions-refresh" type="button" class="button secondary">Refresh operations</button>
+        </details>
       </section>
 
       <aside class="panel inspector" aria-labelledby="inspector-title">

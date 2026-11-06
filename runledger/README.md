@@ -49,7 +49,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **49 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **57 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, full-ledger queries, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -144,3 +144,14 @@ Keep all event identities, idempotency keys/digests and receiver inbox receipts 
 The console can pause and resume dispatch while ingestion continues. A pause takes effect at the next transactional claim; current HTTP requests finish normally. Queued retries and replayed dead letters retain their due timestamps and generations. Expired leases remain visible during pause and are reclaimed with token fencing after resume. The control state persists across restarts and WAL backup/restore. Older databases initialize with running dispatch.
 
 `GET /api/dispatch` returns `{paused, revision, updated_at}`. `POST /api/dispatch` accepts `{paused: true, expected_revision: 0}` with `Content-Type: application/json`. Matching revisions authorize a state transition; stale revisions return HTTP 409 with a refresh instruction. Same-state requests preserve the revision. Overview and metrics include the dispatch state in their existing read transactions. The console refreshes its state after each control action.
+
+
+## Audited replay operations
+
+Select dead letters with the table checkboxes or select the dead letters on the current page. A selection can span pages and contain up to 50 records. **Replay selected** queues the whole selection in one transaction after checking every current status and expected generation. A stale selection returns HTTP 409 and preserves every target. Single-delivery replay in the console uses the same operation API.
+
+`POST /api/replays` accepts `{operation_key: "operator-request-1", deliveries: [{id: "<delivery UUID>", generation: 1}]}`. A new operation returns HTTP 202 with a stable `action_id`, `replayed_count` and each generation transition. Retry the same operation key and targets to receive HTTP 200 with `duplicate: true`, including after the deliveries finish. Reordering the same targets preserves operation identity. A changed selection under a recorded key returns HTTP 409.
+
+The console saves an outstanding request in tab session storage. After a lost response or page reload, **Retry replay request** resends that key and reads the durable receipt. The audit panel and `GET /api/actions?limit=20` expose recent operations, their keys, targets and timestamps. Limits range from 1 to 100. Operator receipts survive restart and backup/restore; the original single-delivery HTTP endpoint retains its prior contract.
+
+The audit identifies local operations in this loopback demonstration. User identity and multi-tenant authorization remain future deployment work. Keep operation keys, results and earlier attempt generations with the corresponding delivery history when defining retention.

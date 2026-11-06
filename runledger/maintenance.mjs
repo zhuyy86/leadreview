@@ -15,7 +15,10 @@ const requiredColumns = {
   receiver: ['id', 'mode', 'duplicates'],
   transient_failures: ['delivery_id']
 };
-const optionalColumns = { dispatch_control: ['id', 'paused', 'revision', 'updated_at'] };
+const optionalColumns = {
+  dispatch_control: ['id', 'paused', 'revision', 'updated_at'],
+  operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result']
+};
 
 function inspect(db) {
   const check = db.prepare('PRAGMA quick_check(1)').get();

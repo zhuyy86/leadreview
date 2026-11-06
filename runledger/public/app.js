@@ -36,6 +36,24 @@ let noticeTimer;
 let pageCursors = [null];
 let loading = false;
 let searchTimer;
+const replaySelection = new Map();
+let pendingReplay = readSavedReplay();
+
+function readSavedReplay() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem('runledger.pendingReplay'));
+    if (value && typeof value.operation_key === 'string' && Array.isArray(value.deliveries) &&
+        value.deliveries.length >= 1 && value.deliveries.length <= 50 && value.deliveries.every(item =>
+          /^[0-9a-f-]{36}$/.test(item.id) && Number.isSafeInteger(item.generation) && item.generation > 0)) return value;
+  } catch { /* The server still validates every replay request. */ }
+}
+
+function savePendingReplay() {
+  try {
+    if (pendingReplay) sessionStorage.setItem('runledger.pendingReplay', JSON.stringify(pendingReplay));
+    else sessionStorage.removeItem('runledger.pendingReplay');
+  } catch { /* Keep the active request in memory when browser storage is unavailable. */ }
+}
 
 function element(tag, className, value) {
   const node = document.createElement(tag);
@@ -63,9 +81,15 @@ function time(value, formatter = clock) {
 function updateControls() {
   seedButton.disabled = !online || busy;
   select('#dispatch-toggle').disabled = !online || busy || !overview?.dispatch;
+  select('#bulk-replay').disabled = !online || busy || !(pendingReplay || replaySelection.size);
+  select('#bulk-replay').textContent = pendingReplay ? 'Retry replay request' : 'Replay selected';
+  select('#clear-selection').disabled = busy || Boolean(pendingReplay) || replaySelection.size === 0;
+  select('#select-dead-page').disabled = !online || busy || Boolean(pendingReplay) || !overview?.deliveries.some(d => d.status === 'dead');
+  select('#selection-count').textContent = pendingReplay ? 'Saved replay request ready for retry' : `${replaySelection.size} selected · 50 per operation`;
+  for (const input of rows.querySelectorAll('input[data-replay]')) input.disabled = busy || Boolean(pendingReplay);
   for (const button of modeButtons) button.disabled = !online || busy;
   const replayButton = select('#replay');
-  if (replayButton) replayButton.disabled = !online || busy;
+  if (replayButton) replayButton.disabled = !online || busy || Boolean(pendingReplay);
   select('#previous-page').disabled = !online || busy || loading || pageCursors.length === 1;
   select('#next-page').disabled = !online || busy || loading || !overview?.page.has_more;
   select('#newest-page').disabled = !online || busy || loading;
@@ -94,7 +118,11 @@ async function request(path, method = 'GET', body) {
     ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed with HTTP ${response.status}.`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -125,13 +153,18 @@ function renderOverview() {
 function renderTable() {
   if (!overview) return;
   const visible = overview.deliveries;
-  const signature = JSON.stringify([visible, selectedId]);
+  for (const delivery of visible) {
+    if (replaySelection.has(delivery.id) &&
+        (delivery.status !== 'dead' || replaySelection.get(delivery.id) !== delivery.generation)) replaySelection.delete(delivery.id);
+  }
+  const signature = JSON.stringify([visible, selectedId, [...replaySelection]]);
   if (signature !== tableSignature) {
     const focusedId = document.activeElement?.closest('tr[data-delivery]')?.dataset.delivery;
+    const focusSelection = document.activeElement?.matches('input[data-replay]');
     rows.replaceChildren(...visible.map(renderRow));
     if (focusedId) {
       const focusedRow = [...rows.children].find(row => row.dataset.delivery === focusedId);
-      focusedRow?.querySelector('button').focus({ preventScroll: true });
+      focusedRow?.querySelector(focusSelection ? 'input' : 'button')?.focus({ preventScroll: true });
     }
     tableSignature = signature;
   }
@@ -159,7 +192,17 @@ function renderRow(delivery) {
   if (delivery.generation > 1) attemptsCell.append(element('span', 'row-generation', `Gen ${delivery.generation}`));
   const createdCell = element('td');
   createdCell.append(time(delivery.created_at));
-  row.append(eventCell, statusCell, attemptsCell, createdCell);
+  const selectionCell = element('td', 'selection-cell');
+  if (delivery.status === 'dead') {
+    const checkbox = element('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.replay = delivery.id;
+    checkbox.setAttribute('aria-label', 'Select ' + delivery.event_id);
+    checkbox.checked = replaySelection.has(delivery.id);
+    checkbox.disabled = busy || Boolean(pendingReplay);
+    selectionCell.append(checkbox);
+  }
+  row.append(selectionCell, eventCell, statusCell, attemptsCell, createdCell);
   return row;
 }
 
@@ -200,11 +243,8 @@ function renderDetail({ delivery, attempts }) {
     const replay = element('button', 'button secondary', 'Replay delivery');
     replay.id = 'replay';
     replay.type = 'button';
-    replay.disabled = busy || !online;
-    replay.addEventListener('click', () => mutate(
-      `/api/deliveries/${encodeURIComponent(delivery.id)}/replay`, undefined,
-      () => 'Replay queued. Previous attempts remain in the timeline.',
-    ));
+    replay.disabled = busy || !online || Boolean(pendingReplay);
+    replay.addEventListener('click', () => replayBatch([{ id: delivery.id, generation: delivery.generation }]));
     detail.append(replay);
   }
   detail.append(element('h3', 'attempt-heading', 'ATTEMPT HISTORY'));
@@ -306,6 +346,87 @@ async function mutate(path, body, onSuccess) {
   }
 }
 
+async function replayBatch(targets) {
+  if (busy || !online) return;
+  pendingReplay ??= { operation_key: crypto.randomUUID(), deliveries: targets };
+  savePendingReplay();
+  busy = true;
+  ++overviewRequest;
+  ++detailRequest;
+  updateControls();
+  try {
+    const result = await request('/api/replays', 'POST', pendingReplay);
+    pendingReplay = undefined;
+    savePendingReplay();
+    replaySelection.clear();
+    showNotice(`${result.replayed_count} replay(s) queued. Operation ${result.action_id}.`);
+    if (select('#operator-audit').open) await loadActions();
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500) {
+      pendingReplay = undefined;
+      savePendingReplay();
+      replaySelection.clear();
+      showNotice(error.message, true);
+    } else {
+      showNotice('Replay request saved for retry. Use Retry replay request to read its recorded result.', true);
+    }
+  } finally {
+    await refresh();
+    busy = false;
+    updateControls();
+  }
+}
+
+select('#bulk-replay').addEventListener('click', () => replayBatch(
+  [...replaySelection].map(([id, generation]) => ({ id, generation }))));
+select('#clear-selection').addEventListener('click', () => {
+  if (pendingReplay || busy) return;
+  replaySelection.clear();
+  renderTable();
+});
+select('#select-dead-page').addEventListener('click', () => {
+  if (pendingReplay || busy) return;
+  for (const d of overview.deliveries) {
+    if (d.status === 'dead' && replaySelection.size < 50) replaySelection.set(d.id, d.generation);
+  }
+  renderTable();
+});
+rows.addEventListener('change', event => {
+  const id = event.target.dataset.replay;
+  if (!id || busy || pendingReplay) return;
+  if (event.target.checked) {
+    if (replaySelection.size === 50) {
+      event.target.checked = false;
+      showNotice('Select up to 50 dead letters per operation.', true);
+      return;
+    }
+    replaySelection.set(id, overview.deliveries.find(d => d.id === id).generation);
+  } else replaySelection.delete(id);
+  renderTable();
+});
+
+async function loadActions() {
+  const button = select('#actions-refresh');
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const data = await request('/api/actions?limit=10');
+    select('#action-rows').replaceChildren(...data.actions.map(action => {
+      const row = element('li');
+      row.append(`${action.replayed_count} replay(s) · `, time(action.created_at, fullClock),
+        element('code', null, action.id));
+      return row;
+    }));
+    if (!data.actions.length) select('#action-rows').append(element('li', null, 'Replay operations appear here.'));
+  } catch (error) {
+    select('#action-rows').replaceChildren(element('li', null, error.message));
+  } finally { button.disabled = false; }
+}
+select('#operator-audit').addEventListener('toggle', event => {
+  if (event.currentTarget.open) void loadActions();
+});
+select('#actions-refresh').addEventListener('click', loadActions);
+
 for (const button of modeButtons) {
   button.addEventListener('click', () => {
     const { mode } = button.dataset;
@@ -359,6 +480,7 @@ select('#newest-page').addEventListener('click', () => {
   void refresh();
 });
 rows.addEventListener('click', event => {
+  if (event.target.closest('input[data-replay]')) return;
   const row = event.target.closest('tr[data-delivery]');
   if (!row) return;
   choose(row.dataset.delivery);

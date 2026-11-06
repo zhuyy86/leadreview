@@ -129,3 +129,64 @@ test('Browser finds an old dead letter, pages the ledger, rejects stale results 
     await app.close();
   }
 });
+
+test('Browser recovers a lost batch-replay acknowledgment through its saved operation key', { timeout: 30_000 }, async () => {
+  const app = await startApp({ databasePath: ':memory:', port: 0, workerCount: 0 });
+  let browser;
+  try {
+    app.store.setDispatch({ paused: true, expected_revision: 0 });
+    const targets = [];
+    // Build the dead-letter fixture under running dispatch, then pause it.
+    app.store.setDispatch({ paused: false, expected_revision: 1 });
+    for (let i = 0; i < 2; i++) {
+      const item = app.store.ingest({ key: 'batch-' + i, type: 'batch.failed', payload: { i } }, 100);
+      app.store.finish(app.store.claim(100), { outcome: 'dead', httpStatus: 503 }, 101);
+      targets.push(item.delivery_id);
+    }
+    app.store.setDispatch({ paused: true, expected_revision: 2 });
+    browser = await chromium.launch({
+      ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}), headless: true
+    });
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    let loseAcknowledgment = true;
+    const requestKeys = [];
+    await page.route('**/api/replays', async route => {
+      requestKeys.push(route.request().postDataJSON().operation_key);
+      if (!loseAcknowledgment) return route.continue();
+      loseAcknowledgment = false;
+      const response = await route.fetch();
+      assert.equal(response.status(), 202);
+      await route.abort('failed');
+    });
+    await page.goto(app.url);
+    await page.waitForFunction(() => document.querySelector('#rows input[data-replay]'));
+    await page.locator('#select-dead-page').click();
+    assert.match(await page.locator('#selection-count').textContent(), /^2 selected/);
+    await page.locator('#bulk-replay').click();
+    await page.waitForFunction(() => document.querySelector('#bulk-replay').textContent === 'Retry replay request'
+      && !document.querySelector('#bulk-replay').disabled);
+    assert.equal(app.store.operatorActions().length, 1);
+    for (const id of targets) assert.equal(app.store.detail(id).delivery.generation, 2);
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector('#bulk-replay').textContent === 'Retry replay request'
+      && !document.querySelector('#bulk-replay').disabled);
+    await page.locator('#bulk-replay').click();
+    await page.waitForFunction(() => document.querySelector('#bulk-replay').textContent === 'Replay selected'
+      && document.querySelector('#bulk-replay').disabled);
+    assert.equal(requestKeys.length, 2);
+    assert.equal(requestKeys[0], requestKeys[1]);
+    assert.equal(app.store.operatorActions().length, 1);
+    assert.equal(app.store.metrics().deliveries.queued, 2);
+    await page.locator('#operator-audit > summary').click();
+    await page.waitForFunction(() => document.querySelector('#action-rows').textContent.includes('2 replay(s)'));
+    assert.equal(await page.locator('#action-rows code').textContent(), app.store.operatorActions()[0].id);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.deepEqual(errors, []);
+  } finally {
+    if (browser) await browser.close();
+    await app.close();
+  }
+});
