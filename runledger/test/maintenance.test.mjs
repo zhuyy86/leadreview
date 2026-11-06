@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { archiveDelivered, planRetention, snapshotLedger } from '../maintenance.mjs';
+import { archiveDelivered, createArtifactManifest, planRetention, snapshotLedger,
+  verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
 const execute = promisify(execFile);
@@ -25,7 +26,8 @@ async function fixture(t) {
     path: name => join(root, name),
     async noStaging() {
       assert.ok((await readdir(root)).every(name =>
-        !name.startsWith('.runledger-snapshot-') && !name.startsWith('.runledger-archive-')));
+        !name.startsWith('.runledger-snapshot-') && !name.startsWith('.runledger-archive-') &&
+        !name.startsWith('.runledger-manifest-')));
     },
     open(name, options) {
       const store = openStore(join(root, name), options);
@@ -353,4 +355,135 @@ test('Archive CLI returns verifiable JSON and validates its cutoff contract', as
   for (const value of ['-1', '1.5', 'NaN', '8640000000000001']) {
     await assert.rejects(execute(process.execPath, [...args.slice(0, -1), value]), error => error.code === 2);
   }
+});
+
+test('Signed manifest binds a backup checksum, size, type and row counts', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  const backup = f.path('backup.sqlite');
+  await snapshotLedger({ source: f.path('source.sqlite'), output: backup });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 7), { mode: 0o600 });
+  const created = await createArtifactManifest({ artifact: backup, output: f.path('backup.manifest.json'),
+    secretFile: f.path('secret.key') });
+  assert.equal(created.artifact_kind, 'ledger_backup');
+  assert.equal(created.artifact_sha256, createHash('sha256').update(await readFile(backup)).digest('hex'));
+  const manifest = JSON.parse(await readFile(f.path('backup.manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.details.counts, { events: 1, deliveries: 1, attempts: 0, inbox: 0 });
+  assert.equal(manifest.signature.algorithm, 'hmac-sha256');
+  const verified = await verifyArtifactManifest({ artifact: backup, manifest: f.path('backup.manifest.json'),
+    secretFile: f.path('secret.key') });
+  assert.equal(verified.verified, true);
+  assert.equal(verified.artifact_sha256, created.artifact_sha256);
+  await f.noStaging();
+});
+
+test('Signed manifest captures archive cutoff, receipts and metric contract', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  source.receive(accepted.delivery_id, 111);
+  const archive = f.path('archive.sqlite');
+  await archiveDelivered({ source: f.path('source.sqlite'), output: archive, before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(48, 3));
+  await createArtifactManifest({ artifact: archive, output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const manifest = JSON.parse(await readFile(f.path('archive.manifest.json'), 'utf8'));
+  assert.equal(manifest.artifact_kind, 'delivered_archive');
+  assert.equal(manifest.details.before_ms, 1000);
+  assert.equal(manifest.details.counts.inbox, 1);
+  assert.match(manifest.details.metric_contract.percentile, /nearest-rank/);
+  assert.equal((await verifyArtifactManifest({ artifact: archive, manifest: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') })).verified, true);
+});
+
+test('Manifest verification rejects artifact tampering and renamed artifact substitution', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const backup = f.path('backup.sqlite');
+  await snapshotLedger({ source: f.path('source.sqlite'), output: backup });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 4));
+  await createArtifactManifest({ artifact: backup, output: f.path('manifest.json'), secretFile: f.path('secret.key') });
+  await copyFile(backup, f.path('renamed.sqlite'));
+  await assert.rejects(verifyArtifactManifest({ artifact: f.path('renamed.sqlite'), manifest: f.path('manifest.json'),
+    secretFile: f.path('secret.key') }), /name does not match/);
+  await writeFile(backup, 'tamper', { flag: 'a' });
+  await assert.rejects(verifyArtifactManifest({ artifact: backup, manifest: f.path('manifest.json'),
+    secretFile: f.path('secret.key') }), /checksum or byte count/);
+});
+
+test('Manifest verification rejects edited metadata and a different secret', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const backup = f.path('backup.sqlite');
+  await snapshotLedger({ source: f.path('source.sqlite'), output: backup });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 5));
+  await writeFile(f.path('other.key'), Buffer.alloc(32, 6));
+  const manifestPath = f.path('manifest.json');
+  await createArtifactManifest({ artifact: backup, output: manifestPath, secretFile: f.path('secret.key') });
+  await assert.rejects(verifyArtifactManifest({ artifact: backup, manifest: manifestPath,
+    secretFile: f.path('other.key') }), /signature verification failed/);
+  const edited = JSON.parse(await readFile(manifestPath, 'utf8'));
+  edited.details.counts.events = 99;
+  await writeFile(manifestPath, JSON.stringify(edited));
+  await assert.rejects(verifyArtifactManifest({ artifact: backup, manifest: manifestPath,
+    secretFile: f.path('secret.key') }), /signature verification failed/);
+});
+
+test('Manifest publication has one winner and preserves existing output', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const backup = f.path('backup.sqlite');
+  await snapshotLedger({ source: f.path('source.sqlite'), output: backup });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 8));
+  const request = { artifact: backup, output: f.path('shared.json'), secretFile: f.path('secret.key') };
+  const results = await Promise.allSettled([createArtifactManifest(request), createArtifactManifest(request)]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+  assert.equal((await verifyArtifactManifest({ artifact: backup, manifest: f.path('shared.json'),
+    secretFile: f.path('secret.key') })).verified, true);
+  await writeFile(f.path('existing.json'), 'preserve');
+  await assert.rejects(createArtifactManifest({ ...request, output: f.path('existing.json') }), /already exists/);
+  assert.equal(await readFile(f.path('existing.json'), 'utf8'), 'preserve');
+  await f.noStaging();
+});
+
+test('Manifest path and key validation reject aliases and weak key material', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const backup = f.path('backup.sqlite');
+  await snapshotLedger({ source: f.path('source.sqlite'), output: backup });
+  await writeFile(f.path('short.key'), 'short');
+  await assert.rejects(createArtifactManifest({ artifact: backup, output: f.path('manifest.json'),
+    secretFile: f.path('short.key') }), /32 to 4096/);
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 9));
+  await assert.rejects(createArtifactManifest({ artifact: backup, output: backup,
+    secretFile: f.path('secret.key') }), /distinct/);
+  await assert.rejects(createArtifactManifest({ artifact: backup, output: f.path('secret.key'),
+    secretFile: f.path('secret.key') }), /distinct/);
+  await link(backup, f.path('artifact-key-alias'));
+  await assert.rejects(createArtifactManifest({ artifact: backup, output: f.path('alias-manifest.json'),
+    secretFile: f.path('artifact-key-alias') }), /32 to 4096|distinct files/);
+  await createArtifactManifest({ artifact: backup, output: f.path('valid-manifest.json'),
+    secretFile: f.path('secret.key') });
+  await link(f.path('secret.key'), f.path('key-alias.json'));
+  await assert.rejects(verifyArtifactManifest({ artifact: backup, manifest: f.path('key-alias.json'),
+    secretFile: f.path('secret.key') }), /distinct files/);
+});
+
+test('Manifest CLI signs and verifies offline artifacts with strict argument shapes', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  await snapshotLedger({ source: f.path('source.sqlite'), output: f.path('backup.sqlite') });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 10));
+  const sign = [cli, 'sign-manifest', '--artifact', f.path('backup.sqlite'), '--output', f.path('manifest.json'),
+    '--secret-file', f.path('secret.key')];
+  assert.equal(JSON.parse((await execute(process.execPath, sign)).stdout).operation, 'sign-manifest');
+  const verify = [cli, 'verify-manifest', '--artifact', f.path('backup.sqlite'), '--manifest', f.path('manifest.json'),
+    '--secret-file', f.path('secret.key')];
+  assert.equal(JSON.parse((await execute(process.execPath, verify)).stdout).verified, true);
+  await assert.rejects(execute(process.execPath, [...verify, '--output', f.path('extra')]), error => error.code === 2);
+  await assert.rejects(execute(process.execPath, [cli, 'sign-manifest', '--artifact', f.path('backup.sqlite')]),
+    error => error.code === 2);
 });

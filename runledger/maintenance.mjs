@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, link, lstat, mkdir, mkdtemp, open, rm, stat } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rm, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { backup, DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -41,6 +41,152 @@ async function hashFile(path) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest('hex');
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  if (value !== null && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+function sameFileObservation(first, second) {
+  return first.dev === second.dev && first.ino === second.ino && first.size === second.size &&
+    first.mtimeNs === second.mtimeNs && first.ctimeNs === second.ctimeNs;
+}
+
+function sameFileIdentity(first, second) {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+async function secretKey(path) {
+  path = resolve(path);
+  const info = await lstat(path, { bigint: true });
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error('Secret key must be a regular file, not a symbolic link.');
+  const key = await readFile(path);
+  if (key.length < 32 || key.length > 4096) throw new Error('Secret key must contain 32 to 4096 bytes.');
+  return { path, key, info };
+}
+
+function inspectOfflineArtifact(path) {
+  const db = new DatabaseSync(path, { readOnly: true, timeout: 4000 });
+  try {
+    if (Object.values(db.prepare('PRAGMA quick_check(1)').get())[0] !== 'ok') {
+      throw new Error('SQLite integrity check failed.');
+    }
+    if (db.prepare('PRAGMA foreign_key_check').get()) throw new Error('SQLite foreign-key check failed.');
+    const metadata = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'metadata'").get();
+    if (metadata?.type === 'table') {
+      const rows = Object.fromEntries(db.prepare('SELECT key, value FROM metadata').all().map(row => {
+        try { return [row.key, JSON.parse(row.value)]; }
+        catch { throw new Error('Archive metadata contains invalid JSON.'); }
+      }));
+      if (rows.format !== 'runledger-delivered-archive-v1' || !Number.isSafeInteger(rows.before_ms) ||
+          !rows.counts || typeof rows.metric_contract !== 'object') {
+        throw new Error('Not a compatible RunLedger archive.');
+      }
+      const actual = Object.fromEntries(['events', 'deliveries', 'attempts', 'inbox', 'operator_actions'].map(table => [
+        table, db.prepare(`SELECT count(*) AS count FROM ${table}`).get().count
+      ]));
+      if (canonicalJson(actual) !== canonicalJson(rows.counts)) throw new Error('Archive metadata counts do not match its rows.');
+      return { kind: 'delivered_archive', details: { format: rows.format, before_ms: rows.before_ms,
+        counts: actual, metric_contract: rows.metric_contract, identity_contract: rows.identity_contract } };
+    }
+    return { kind: 'ledger_backup', details: { counts: inspect(db) } };
+  } finally { db.close(); }
+}
+
+async function publishManifest(output, document) {
+  output = resolve(output);
+  try {
+    await lstat(output);
+    throw new Error('Manifest output already exists; choose a new file path.');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  await mkdir(dirname(output), { recursive: true });
+  let staging;
+  try {
+    staging = await mkdtemp(join(dirname(output), '.runledger-manifest-'));
+    const temporary = join(staging, 'manifest.json');
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(document, null, 2) + '\n', 'utf8');
+      await handle.sync();
+    } finally { await handle.close(); }
+    await link(temporary, output);
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true });
+  }
+  return output;
+}
+
+export async function createArtifactManifest({ artifact, output, secretFile }) {
+  if (![artifact, output, secretFile].every(value => typeof value === 'string' && value)) {
+    throw new TypeError('Provide artifact, output and secret key file paths.');
+  }
+  artifact = resolve(artifact);
+  output = resolve(output);
+  const secret = await secretKey(secretFile);
+  if (new Set([artifact.toLowerCase(), output.toLowerCase(), secret.path.toLowerCase()]).size !== 3) {
+    throw new Error('Artifact, manifest and secret key paths must be distinct.');
+  }
+  const before = await lstat(artifact, { bigint: true });
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error('Artifact must be a regular file, not a symbolic link.');
+  if (sameFileIdentity(before, secret.info)) throw new Error('Artifact and secret key must be distinct files.');
+  const inspected = inspectOfflineArtifact(artifact);
+  const sha256 = await hashFile(artifact);
+  const after = await lstat(artifact, { bigint: true });
+  if (!sameFileObservation(before, after)) throw new Error('Artifact changed while its manifest was being created.');
+  const body = { version: 1, artifact_name: basename(artifact), artifact_kind: inspected.kind,
+    artifact_bytes: Number(after.size), artifact_sha256: sha256, created_at: new Date().toISOString(),
+    details: inspected.details };
+  const signature = createHmac('sha256', secret.key).update(canonicalJson(body)).digest('hex');
+  const document = { ...body, signature: { algorithm: 'hmac-sha256', value: signature } };
+  await publishManifest(output, document);
+  return { artifact, manifest: output, artifact_kind: body.artifact_kind, artifact_bytes: body.artifact_bytes,
+    artifact_sha256: sha256, signature_algorithm: 'hmac-sha256', created_at: body.created_at };
+}
+
+export async function verifyArtifactManifest({ artifact, manifest, secretFile }) {
+  if (![artifact, manifest, secretFile].every(value => typeof value === 'string' && value)) {
+    throw new TypeError('Provide artifact, manifest and secret key file paths.');
+  }
+  artifact = resolve(artifact);
+  manifest = resolve(manifest);
+  const secret = await secretKey(secretFile);
+  const artifactInfo = await lstat(artifact, { bigint: true });
+  const manifestInfo = await lstat(manifest, { bigint: true });
+  if (artifactInfo.isSymbolicLink() || !artifactInfo.isFile() || manifestInfo.isSymbolicLink() || !manifestInfo.isFile()) {
+    throw new Error('Artifact and manifest must be regular files, not symbolic links.');
+  }
+  if (sameFileIdentity(artifactInfo, manifestInfo) || sameFileIdentity(artifactInfo, secret.info) ||
+      sameFileIdentity(manifestInfo, secret.info)) throw new Error('Artifact, manifest and secret key must be distinct files.');
+  let document;
+  try { document = JSON.parse(await readFile(manifest, 'utf8')); }
+  catch (error) { throw new Error('Manifest is not valid JSON: ' + error.message); }
+  const expectedKeys = ['artifact_bytes', 'artifact_kind', 'artifact_name', 'artifact_sha256', 'created_at', 'details', 'signature', 'version'];
+  if (!document || Array.isArray(document) || canonicalJson(Object.keys(document).sort()) !== canonicalJson(expectedKeys) ||
+      document.version !== 1 || !document.signature || document.signature.algorithm !== 'hmac-sha256' ||
+      !/^[0-9a-f]{64}$/.test(document.signature.value ?? '')) throw new Error('Manifest structure is invalid.');
+  const { signature, ...body } = document;
+  const expected = createHmac('sha256', secret.key).update(canonicalJson(body)).digest();
+  const supplied = Buffer.from(signature.value, 'hex');
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error('Manifest signature verification failed.');
+  if (body.artifact_name !== basename(artifact)) throw new Error('Manifest artifact name does not match the selected file.');
+  const info = await lstat(artifact, { bigint: true });
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error('Artifact must be a regular file, not a symbolic link.');
+  const sha256 = await hashFile(artifact);
+  if (Number(info.size) !== body.artifact_bytes || sha256 !== body.artifact_sha256) {
+    throw new Error('Artifact checksum or byte count does not match the manifest.');
+  }
+  const inspected = inspectOfflineArtifact(artifact);
+  if (inspected.kind !== body.artifact_kind || canonicalJson(inspected.details) !== canonicalJson(body.details)) {
+    throw new Error('Artifact contents do not match the manifest metadata.');
+  }
+  return { verified: true, artifact, manifest, artifact_kind: inspected.kind,
+    artifact_bytes: Number(info.size), artifact_sha256: sha256, created_at: body.created_at };
 }
 
 export async function planRetention({ source, before }) {
@@ -306,10 +452,19 @@ export async function main(argv = process.argv.slice(2)) {
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true,
-      options: { source: { type: 'string' }, output: { type: 'string' }, before: { type: 'string' } } });
+      options: { source: { type: 'string' }, output: { type: 'string' }, before: { type: 'string' },
+        artifact: { type: 'string' }, manifest: { type: 'string' }, 'secret-file': { type: 'string' } } });
     const operation = parsed.positionals[0];
-    if (parsed.positionals.length !== 1 || !parsed.values.source) throw new Error();
-    if (operation === 'retention-plan') {
+    if (parsed.positionals.length !== 1) throw new Error();
+    if (operation === 'sign-manifest') {
+      if (!parsed.values.artifact || !parsed.values.output || !parsed.values['secret-file'] || parsed.values.source ||
+          parsed.values.manifest || parsed.values.before !== undefined) throw new Error();
+    } else if (operation === 'verify-manifest') {
+      if (!parsed.values.artifact || !parsed.values.manifest || !parsed.values['secret-file'] || parsed.values.source ||
+          parsed.values.output || parsed.values.before !== undefined) throw new Error();
+    } else if (!parsed.values.source || parsed.values.artifact || parsed.values.manifest || parsed.values['secret-file']) {
+      throw new Error();
+    } else if (operation === 'retention-plan') {
       if (parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
           Number(parsed.values.before) > 8640000000000000) throw new Error();
     } else if (operation === 'archive') {
@@ -322,16 +477,24 @@ export async function main(argv = process.argv.slice(2)) {
     console.error('Usage: node maintenance.mjs backup|restore --source ledger.sqlite --output new.sqlite');
     console.error('       node maintenance.mjs archive --source ledger.sqlite --output archive.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
+    console.error('       node maintenance.mjs sign-manifest --artifact file.sqlite --output file.manifest.json --secret-file key');
+    console.error('       node maintenance.mjs verify-manifest --artifact file.sqlite --manifest file.manifest.json --secret-file key');
     return 2;
   }
   try {
     const operation = parsed.positionals[0];
-    const result = operation === 'retention-plan'
-      ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
-      : operation === 'archive'
-        ? await archiveDelivered({ source: parsed.values.source, output: parsed.values.output,
-          before: Number(parsed.values.before) })
-        : await snapshotLedger(parsed.values);
+    const result = operation === 'sign-manifest'
+      ? await createArtifactManifest({ artifact: parsed.values.artifact, output: parsed.values.output,
+        secretFile: parsed.values['secret-file'] })
+      : operation === 'verify-manifest'
+        ? await verifyArtifactManifest({ artifact: parsed.values.artifact, manifest: parsed.values.manifest,
+          secretFile: parsed.values['secret-file'] })
+        : operation === 'retention-plan'
+          ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
+          : operation === 'archive'
+            ? await archiveDelivered({ source: parsed.values.source, output: parsed.values.output,
+              before: Number(parsed.values.before) })
+            : await snapshotLedger(parsed.values);
     console.log(JSON.stringify({ operation: parsed.positionals[0], ...result }, null, 2));
     return 0;
   } catch (error) {
