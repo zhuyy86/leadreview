@@ -31,6 +31,8 @@ jobs:
         run: node --test runledger/test/*.test.mjs
       - name: Reproduce concurrent idempotent submissions
         run: node runledger/verify-workload.mjs
+      - name: Verify delivered-history archive preservation
+        run: node runledger/verify-archive.mjs --deliveries 100
 
   browser:
     runs-on: ubuntu-latest

@@ -1,0 +1,16 @@
+{
+  "observed_at": "2026-11-06T10:12:16.280Z",
+  "node": "v24.22.1",
+  "platform": "linux",
+  "source_deliveries": 500,
+  "eligible_deliveries": 250,
+  "replayed_deliveries": 50,
+  "archived_attempts": 275,
+  "archived_inbox": 63,
+  "archived_operator_actions": 25,
+  "archive_bytes": 274432,
+  "archive_sha256": "30561870bd6b93b12a27bf74a4a1029927b33516bf8253141bd24981b4b63982",
+  "seed_ms": 227.9,
+  "archive_and_verify_ms": 24.73,
+  "scope": "Local temporary SQLite databases; correctness, preservation and artifact verification. Timings describe this run."
+}

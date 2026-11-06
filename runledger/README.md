@@ -135,6 +135,7 @@ Recovery tests include uncheckpointed WAL, replay and inbox persistence, lease r
 ```sh
 node maintenance.mjs retention-plan --source data/runledger.sqlite --before 1793491200000
 node maintenance.mjs archive --source data/runledger.sqlite --output archives/delivered.sqlite --before 1793491200000
+node verify-archive.mjs --deliveries 500
 ```
 
 `--before` is an exclusive UTC epoch-millisecond completion cutoff (the example is 2026-11-01T00:00:00Z). The plan command reports candidate delivered records, their attempt-row count and logical UTF-8 payload bytes in one read transaction. The archive command pins the same eligibility snapshot and creates a standalone SQLite file. The cutoff uses the successful completion in the current generation, so a recently replayed old event stays in the source-only population until its latest success crosses the boundary. Missing or unfinished attempt history is excluded. Queued, in-flight and dead-letter work remains source-only.
@@ -142,6 +143,8 @@ node maintenance.mjs archive --source data/runledger.sqlite --output archives/de
 Each archive preserves eligible event IDs, idempotency keys/digests, delivery rows, every attempt generation, matching inbox receipts and complete replay-operation receipts that touch an included delivery. A mixed replay receipt can therefore mention another delivery that remains source-only. Archive metadata records counts, the strict cutoff, identity contract and exact nearest-rank latency populations. The file is integrity- and foreign-key-checked, file-synced and published through an exclusive hard link; competing writers produce one winner. Legacy ledgers that predate operation receipts remain readable.
 
 The source transaction is read-only and retains every row, so duplicate submissions, receiver deduplication, live metrics and operator history continue unchanged. Archive creation currently establishes a verifiable preservation boundary; it leaves source cleanup, archive authentication/encryption and cross-file query federation as explicit later work. Logical payload bytes from the preview do not predict reclaimed SQLite file size.
+
+The [recorded archive workload](docs/archive-workload.json) generated 500 completed source deliveries, including 50 dead-letter replays. Its strict midpoint cutoff archived 250 deliveries, 275 attempt generations, 63 inbox receipts and 25 replay-operation receipts. The script reopens the standalone file, checks its rows, integrity, foreign keys, metric contract and SHA-256, then confirms the source metrics and idempotent submission still match. The record contains local environment and timing scope; Linux/Windows CI runs a 100-delivery variant.
 
 
 ## Dispatch operations
