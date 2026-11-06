@@ -17,14 +17,14 @@ Delivers AI job completion events and exposes retries, receiver outages and dead
 - Commits events and queue records together. Canonical payloads deduplicate by idempotency key; conflicts return HTTP 409. Expiring leases fence stale worker completions.
 - Signs HTTP bodies with HMAC. A persistent inbox deduplicates redelivery after a lost acknowledgment; replay preserves delivery IDs and earlier attempt generations.
 - Adds persistent dispatch pause/resume and atomic batch replay with expected-generation checks, idempotent operation receipts and an audit view. Verifies competing operator processes and lost-response recovery.
-- Exposes full-ledger search, cursor pages, queue health and replay-aware p50/p95/p99 latency. WAL-aware snapshots restore queue state, operator controls and receipts to fresh files.
-- Fifty-seven Node.js scenarios cover recovery and HTTP contracts. A 200-request local workload in batches of 20 with two workers deduplicated 100 repeats and delivered 100 unique events. Linux/Windows suites and browser checks pass in CI.
+- Exposes full-ledger search, cursor pages, queue health and replay-aware p50/p95/p99 latency. WAL snapshots restore state; read-only archives preserve completed events, attempts, inbox and replay receipts in verified SQLite files.
+- Sixty-three Node.js scenarios cover recovery, archives and HTTP contracts. A 200-request local workload in batches of 20 with two workers deduplicated 100 repeats and delivered 100 unique events. Linux/Windows suites and browser checks pass in CI.
 
 ## Selected Projects
 
 **[OrderCheck Order Data Quality Workbench](https://github.com/zhuyy86/ordercheck)** Validates money with Decimal, isolates conflicting order groups and exports a seven-sheet audit workbook. Publishes ZIP reports exclusively and replaces KPI JSON after staging and sync. Seventy-eight tests cover rules, provenance, UI/CLI behavior, invalid KPI input and export failures.
 
-**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Commits SQLite snapshots and recoverable export intents together. Incremental CSV history, HTML and alert JSON publish from saved payloads with checksums and durable receipts. Seventy-two tests include process exit, concurrent exporters and two HTTP/CLI runs.
+**[PriceWatch Historical Monitoring](https://github.com/zhuyy86/pricewatch)** Commits SQLite snapshots and recoverable export intents together. Incremental CSV history, HTML and alert JSON publish from saved payloads with checksums and durable receipts. Persistent backlog age and failure state support health probes; 76 tests cover recovery and concurrent exporters.
 
 **[LeadReview and API Contract Lab](https://github.com/zhuyy86/leadreview)** Separates AI extraction, deterministic scoring and human review. Generated n8n code is tested without module globals. HTTP/JSON/SSE regression tooling passes 18 self-tests; lead rules have 17 explicit assertions.
 

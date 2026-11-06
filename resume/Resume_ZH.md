@@ -17,14 +17,14 @@
 - 在同一事务中提交事件和投递任务。幂等键与规范化载荷复用已有投递，同键异载荷返回 HTTP 409；租约令牌约束 Worker 回写。
 - 对 HTTP 原始消息生成 HMAC 签名，以持久化 inbox 去重；验证回执丢失后的再次投递，回放保留投递 ID 和各代尝试记录。
 - 实现持久化暂停／恢复派发，以及带预期代次校验、幂等操作回执和审计视图的原子批量回放；验证真实操作进程竞争、响应丢失与页面刷新续接。
-- 提供全量搜索、游标分页、队列健康及区分回放代次的 p50/p95/p99 延迟。WAL 快照恢复队列、操作控制和回执至新文件。
-- 57 项 Node.js 场景验证恢复与 HTTP 契约。两 Worker、20 路分批并发的本地验证提交 200 次请求，100 次重复被去重，100 个唯一事件送达。Linux、Windows 和浏览器 CI 通过。
+- 提供全量搜索、游标分页、队列健康及区分回放代次的 p50/p95/p99 延迟。WAL 快照恢复状态；只读归档将完成事件、全部尝试、inbox 与回放回执保存为校验后的 SQLite 文件。
+- 63 项 Node.js 场景验证恢复、归档与 HTTP 契约。两 Worker、20 路分批并发的本地验证提交 200 次请求，100 次重复被去重，100 个唯一事件送达。Linux、Windows 和浏览器 CI 通过。
 
 ## 其他工程作品
 
 **[OrderCheck 订单数据质量工作台](https://github.com/zhuyy86/ordercheck)** 以 Decimal 校验金额，整组隔离订单冲突，导出七工作表审计报告。ZIP 完整暂存后独占发布，KPI JSON 同步后原子替换，故障保留旧报告。78 项测试覆盖规则、来源追溯、UI/CLI、KPI 异常与导出故障。
 
-**[PriceWatch 历史价格监测](https://github.com/zhuyy86/pricewatch)** 在同一 SQLite 事务中提交快照与可恢复导出意图。CSV 增量历史、HTML 和告警 JSON 按保存内容发布，校验和与持久化回执支持断点恢复。72 项测试覆盖真实进程退出、并发导出及两轮 HTTP／CLI 链路。
+**[PriceWatch 历史价格监测](https://github.com/zhuyy86/pricewatch)** 在同一 SQLite 事务中提交快照与可恢复导出意图。CSV 增量历史、HTML 和告警 JSON 按保存内容发布，积压时长与失败状态支持健康探针。76 项测试覆盖进程退出、恢复与并发导出。
 
 **[LeadReview 与 API Contract Lab](https://github.com/zhuyy86/leadreview)** 分离 AI 提取、确定性评分与人工审核，验证 n8n 内嵌代码脱离模块全局变量执行。HTTP/JSON/SSE 工具通过 18 项自测，线索规则以 17 条显式断言验证。
 
