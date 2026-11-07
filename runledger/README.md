@@ -49,9 +49,10 @@ The console and demo receiver bind to loopback. SQLite stores the queue, lease, 
 ```sh
 node --test
 node verify-workload.mjs
+node verify-lookup.mjs
 ```
 
-- **87 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, archive checkpoints, transactional payload compaction, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **92 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, indexed lookup plans, archive checkpoints, transactional payload compaction, database repacking, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -117,6 +118,7 @@ Run from this directory with Node.js 24. Both commands require a new output path
 ```sh
 node maintenance.mjs backup --source data/runledger.sqlite --output backups/ledger.sqlite
 node maintenance.mjs restore --source backups/ledger.sqlite --output data/recovered.sqlite
+node maintenance.mjs repack --source data/runledger.sqlite --output maintenance/compacted.sqlite
 ```
 
 Backup uses Node.js's [SQLite online backup API](https://nodejs.org/download/release/v24.0.0/docs/api/sqlite.html#sqlitebackupsourceDb-path-options). A read transaction pins one committed snapshot while WAL writers continue. The resulting standalone file includes committed WAL pages, events, deliveries, leases, all replay generations and inbox receipts. Changes committed after the pinned snapshot are outside its recovery point. A long read snapshot can keep WAL pages alive until copying finishes.
@@ -128,6 +130,10 @@ The JSON result includes SHA-256, byte/page counts and snapshot row counts. The 
 An in-flight task retains its original lease and can be reclaimed after expiry; a stale token cannot complete the reclaimed task. Restored inbox entries still suppress duplicate receipts. This demonstrates recovery of the captured single-machine state. Delivered-history archiving is available as a separate read-only operation; source cleanup remains an explicit future policy.
 
 Recovery tests include uncheckpointed WAL, replay and inbox persistence, lease reclamation, a concurrent writer, competing publishers, existing-target protection, malformed databases, foreign-key corruption and the CLI round trip.
+
+`repack` uses SQLite `VACUUM INTO` against a read-only connection to produce a new compact candidate from one committed snapshot. It validates the source first, validates the candidate and its foreign keys, requires zero output free-list pages, switches the candidate to standalone DELETE-journal mode, file-syncs it and publishes through an exclusive hard link. The JSON result records SHA-256, row counts, source/output page observations and their logical byte delta. It also verifies that the source path still names the same file identity before publication. The live database path stays unchanged; perform any switchover through the explicit stop-and-restore procedure above.
+
+Repack tests carry uncheckpointed WAL state, idempotency, latency populations, archive checkpoints, compaction receipts and event mappings into the candidate. Fault cases cover malformed sources, path aliases, existing targets and competing publishers. Source page observations can change across concurrent workloads, and logical page deltas describe this snapshot rather than durable storage savings. Directory fsync, encrypted storage and secure erasure remain deployment-specific operations.
 
 ### Signed offline artifact manifests
 
@@ -174,7 +180,9 @@ node maintenance.mjs locate-history \
   --id delivery-or-event-or-idempotency-key
 ```
 
-The command performs exact matching on delivery ID, event ID or idempotency key. It validates the active ledger, authenticates and re-inspects every archive, observes stable artifact identity through lookup, then returns one logical match with every active/archive location. Artifact checksum and manifest creation time accompany archive locations. Identical copies merge by delivery ID; any difference in identity, type, timestamps, status, generation or attempt counters raises a conflict. Empty results still report how many archives were verified.
+The command performs exact matching on delivery ID, event ID or idempotency key. Three index-directed branches use the primary/unique indexes in both the active ledger and each archive, then merge at most three candidates. A query-plan regression rejects scans of either base table and also verifies that one record matching two identity fields is returned once. The command validates the active ledger, authenticates and re-inspects every archive, observes stable artifact identity through lookup, then returns one logical match with every active/archive location. Artifact checksum and manifest creation time accompany archive locations. Identical copies merge by delivery ID; any difference in identity, type, timestamps, status, generation or attempt counters raises a conflict. Empty results still report how many archives were verified.
+
+The [recorded lookup workload](docs/lookup-workload.json) uses 20,000 active deliveries, a 10,000-row signed archive and 1,000 probes per database. On that local Linux/Node.js 24 run, prepared-query p50 changed from 9.469 ms to 0.008 ms for the active ledger and from 4.003 ms to 0.006 ms for the archive. Full verified queries measured 52-65 ms because they also perform HMAC, SHA-256, metadata, integrity and foreign-key checks. Reproduce with `node verify-lookup.mjs`; CI uses a smaller 2,000-row fixture and asserts index-directed query plans on Linux and Windows.
 
 ### Signed archive checkpoints
 
@@ -210,7 +218,7 @@ The command reauthenticates and re-inspects the signed archive, requires its rec
 
 The payload updates, per-event archive mappings and one compaction receipt commit in the same transaction. The receipt records scanned and changed event counts plus logical UTF-8 bytes before and after. A trigger-induced mid-update failure rolls back the complete batch. Concurrent processes return one new receipt and one revalidated duplicate result. Online backup retains both tracking tables, and later retention plans and archives skip mapped events so the marker cannot replace original history in a newer archive.
 
-Logical bytes describe live payload values. SQLite pages, WAL records and free space follow SQLite storage lifecycle; physical reclamation and secure erasure are separate operations. The signed archive remains the source for original payload retrieval.
+Logical bytes describe live payload values. The `repack` command can materialize a compact, independently validated candidate after compaction. SQLite WAL lifecycle, live-file switchover and secure erasure remain explicit operational steps. The signed archive remains the source for original payload retrieval.
 
 
 ## Dispatch operations
