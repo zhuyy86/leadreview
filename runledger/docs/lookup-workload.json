@@ -1,9 +1,10 @@
 {
-  "observed_at": "2026-11-07T10:58:53.753Z",
+  "observed_at": "2026-11-07T20:57:30.647Z",
   "node": "v24.22.1",
   "platform": "linux",
   "source_deliveries": 20000,
   "archived_deliveries": 10000,
+  "signed_archive_copies": 4,
   "probes_per_database": 1000,
   "source_query_plan": [
     "CO-ROUTINE matches",
@@ -50,40 +51,56 @@
   ],
   "source_kernel": {
     "probes": 1000,
-    "min_ms": 0.004,
-    "p50_ms": 0.008,
-    "p95_ms": 0.012,
-    "max_ms": 0.269
+    "min_ms": 0.003,
+    "p50_ms": 0.007,
+    "p95_ms": 0.011,
+    "max_ms": 3.109
   },
   "archive_kernel": {
     "probes": 1000,
     "min_ms": 0.005,
     "p50_ms": 0.006,
-    "p95_ms": 0.023,
-    "max_ms": 0.207
+    "p95_ms": 0.012,
+    "max_ms": 1.578
   },
   "prior_source_kernel": {
     "probes": 1000,
-    "min_ms": 8.235,
-    "p50_ms": 9.469,
-    "p95_ms": 11.149,
-    "max_ms": 16.108
+    "min_ms": 7.214,
+    "p50_ms": 8.088,
+    "p95_ms": 14.549,
+    "max_ms": 19.44
   },
   "prior_archive_kernel": {
     "probes": 1000,
-    "min_ms": 3.543,
-    "p50_ms": 4.003,
-    "p95_ms": 4.931,
-    "max_ms": 9.612
+    "min_ms": 3.109,
+    "p50_ms": 3.461,
+    "p95_ms": 7.012,
+    "max_ms": 15.527
   },
   "p50_improvement": {
-    "source_times": 1183.6,
-    "archive_times": 667.2
+    "source_times": 1155.4,
+    "archive_times": 576.8
   },
   "verified_lookup_ms": {
-    "archived_match": 64.77,
-    "active_only_match": 51.91,
-    "missing": 52.74
+    "archived_match": 143.23,
+    "active_only_match": 99.68,
+    "missing": 103.38
   },
-  "scope": "Local temporary SQLite files. Kernel timings cover prepared exact-identity SQL only; verified timings also include source integrity checks plus archive HMAC, SHA-256, metadata, integrity and foreign-key verification."
+  "cached_verified_lookup_ms": {
+    "cold": 97.99,
+    "warm": 29.63,
+    "cold_to_warm_times": 3.3,
+    "cache": {
+      "max_entries": 4,
+      "ttl_ms": 60000,
+      "entries": 4,
+      "hits": 4,
+      "misses": 4,
+      "coalesced": 0,
+      "invalidations": 0,
+      "expirations": 0,
+      "evictions": 0
+    }
+  },
+  "scope": "Local temporary SQLite files. Kernel timings cover prepared exact-identity SQL only. Verified timings include source integrity checks plus archive HMAC, SHA-256, metadata, integrity and foreign-key verification. Warm-cache timing still re-stats the archive, manifest and secret before and after each archive query."
 }

@@ -1,23 +1,28 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
-import { archiveDelivered, createArtifactManifest, historyLookupSql, locateHistory } from './maintenance.mjs';
+import { archiveDelivered, createArchiveVerificationCache, createArtifactManifest,
+  historyLookupSql, locateHistory } from './maintenance.mjs';
 import { openStore } from './store.mjs';
 
 const { values } = parseArgs({ options: {
   deliveries: { type: 'string', default: '20000' },
-  probes: { type: 'string', default: '1000' }
+  probes: { type: 'string', default: '1000' },
+  archives: { type: 'string', default: '4' },
+  output: { type: 'string' }
 } });
-if (!/^\d{1,6}$/.test(values.deliveries) || !/^\d{1,6}$/.test(values.probes)) {
-  throw new Error('--deliveries and --probes must be positive integers.');
+if (!/^\d{1,6}$/.test(values.deliveries) || !/^\d{1,6}$/.test(values.probes) || !/^\d{1,2}$/.test(values.archives)) {
+  throw new Error('--deliveries, --probes and --archives must be positive integers.');
 }
 const deliveries = Number(values.deliveries);
 const probes = Number(values.probes);
-if (deliveries < 10 || deliveries > 100_000 || probes < 10 || probes > 100_000) {
-  throw new Error('--deliveries must be 10 to 100000 and --probes must be 10 to 100000.');
+const archiveCopies = Number(values.archives);
+if (deliveries < 10 || deliveries > 100_000 || probes < 10 || probes > 100_000 ||
+    archiveCopies < 1 || archiveCopies > 20) {
+  throw new Error('--deliveries and --probes must be 10 to 100000; --archives must be 1 to 20.');
 }
 
 const directory = await mkdtemp(join(tmpdir(), 'runledger-lookup-workload-'));
@@ -107,6 +112,14 @@ try {
   assert.equal(archived.counts.deliveries, eligible);
   await writeFile(secretPath, Buffer.alloc(32, 29));
   await createArtifactManifest({ artifact: archivePath, output: manifestPath, secretFile: secretPath });
+  const archivePairs = [{ artifact: archivePath, manifest: manifestPath }];
+  for (let index = 1; index < archiveCopies; index++) {
+    const artifact = join(directory, `delivered-${index}.sqlite`);
+    const manifest = join(directory, `delivered-${index}.manifest.json`);
+    await copyFile(archivePath, artifact);
+    await createArtifactManifest({ artifact, output: manifest, secretFile: secretPath });
+    archivePairs.push({ artifact, manifest });
+  }
 
   const archivedQuery = identity('delivery', Math.floor(eligible / 2));
   const activeQuery = identity('event', deliveries - 1);
@@ -141,19 +154,24 @@ try {
     archiveDb.close();
   }
 
-  const common = { source: sourcePath, secretFile: secretPath,
-    archives: [{ artifact: archivePath, manifest: manifestPath }] };
+  const common = { source: sourcePath, secretFile: secretPath, archives: archivePairs };
   const archivedLookup = await measureVerified({ ...common, query: archivedQuery });
   const activeLookup = await measureVerified({ ...common, query: activeQuery });
   const missingLookup = await measureVerified({ ...common, query: missingQuery });
+  const verificationCache = createArchiveVerificationCache({ maxEntries: archiveCopies, ttlMs: 60_000 });
+  const cachedColdLookup = await measureVerified({ ...common, query: archivedQuery, verificationCache });
+  const cachedWarmLookup = await measureVerified({ ...common, query: archivedQuery, verificationCache });
   assert.deepEqual(archivedLookup.result.matches[0].locations.map(location => location.kind),
-    ['active_ledger', 'delivered_archive']);
+    ['active_ledger', ...Array(archiveCopies).fill('delivered_archive')]);
   assert.deepEqual(activeLookup.result.matches[0].locations.map(location => location.kind), ['active_ledger']);
   assert.deepEqual(missingLookup.result.matches, []);
+  assert.equal(cachedColdLookup.result.verification_cache.misses, archiveCopies);
+  assert.equal(cachedWarmLookup.result.verification_cache.hits, archiveCopies);
   assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).artifact_sha256, archived.sha256);
 
-  console.log(JSON.stringify({ observed_at: new Date().toISOString(), node: process.version,
+  const report = { observed_at: new Date().toISOString(), node: process.version,
     platform: process.platform, source_deliveries: deliveries, archived_deliveries: eligible,
+    signed_archive_copies: archiveCopies,
     probes_per_database: probes, source_query_plan: sourcePlan, archive_query_plan: archivePlan,
     prior_source_query_plan: sourceLegacyPlan, prior_archive_query_plan: archiveLegacyPlan,
     source_kernel: sourceKernel, archive_kernel: archiveKernel,
@@ -164,8 +182,14 @@ try {
     },
     verified_lookup_ms: { archived_match: archivedLookup.elapsed_ms,
       active_only_match: activeLookup.elapsed_ms, missing: missingLookup.elapsed_ms },
-    scope: 'Local temporary SQLite files. Kernel timings cover prepared exact-identity SQL only; verified timings also include source integrity checks plus archive HMAC, SHA-256, metadata, integrity and foreign-key verification.'
-  }, null, 2));
+    cached_verified_lookup_ms: { cold: cachedColdLookup.elapsed_ms, warm: cachedWarmLookup.elapsed_ms,
+      cold_to_warm_times: Math.round(cachedColdLookup.elapsed_ms / cachedWarmLookup.elapsed_ms * 10) / 10,
+      cache: verificationCache.snapshot() },
+    scope: 'Local temporary SQLite files. Kernel timings cover prepared exact-identity SQL only. Verified timings include source integrity checks plus archive HMAC, SHA-256, metadata, integrity and foreign-key verification. Warm-cache timing still re-stats the archive, manifest and secret before and after each archive query.'
+  };
+  const rendered = JSON.stringify(report, null, 2) + '\n';
+  if (values.output) await writeFile(resolve(values.output), rendered, 'utf8');
+  process.stdout.write(rendered);
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

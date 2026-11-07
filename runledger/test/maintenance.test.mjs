@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { activateRepackedLedger, archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, historyLookupSql,
+import { activateRepackedLedger, archiveDelivered, checkpointArchive, compactArchivedPayloads,
+  createArchiveVerificationCache, createArtifactManifest, historyLookupSql,
   listArchiveCheckpoints,
   planRetention, repackLedger, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
@@ -787,6 +788,81 @@ test('Exact history lookup uses identity indexes and merges cross-field matches 
   assert.equal(result.matches.length, 1);
   assert.deepEqual(result.matches[0].locations.map(location => location.kind),
     ['active_ledger', 'delivered_archive']);
+});
+
+test('Archive verification cache coalesces concurrent checks and serves identity-checked hits', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 35));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const verificationCache = createArchiveVerificationCache({ maxEntries: 2, ttlMs: 1000 });
+  const request = { source: f.path('source.sqlite'), query: accepted.delivery_id, secretFile: f.path('secret.key'),
+    verificationCache, now: 100, archives: [
+      { artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') }
+    ] };
+  const concurrent = await Promise.all([locateHistory(request), locateHistory(request)]);
+  assert.equal(concurrent.reduce((sum, result) => sum + result.verification_cache.misses, 0), 1);
+  assert.equal(concurrent.reduce((sum, result) => sum + result.verification_cache.coalesced, 0), 1);
+  const warm = await locateHistory({ ...request, now: 101 });
+  assert.deepEqual(warm.verification_cache, { hits: 1, misses: 0, coalesced: 0, bypassed: 0 });
+  assert.deepEqual(warm.matches[0].locations.map(location => location.kind),
+    ['active_ledger', 'delivered_archive']);
+  assert.deepEqual(verificationCache.snapshot(), { max_entries: 2, ttl_ms: 1000, entries: 1,
+    hits: 1, misses: 1, coalesced: 1, invalidations: 0, expirations: 0, evictions: 0 });
+});
+
+test('Archive verification cache expires by TTL and invalidates every file-identity change', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 36));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const verificationCache = createArchiveVerificationCache({ maxEntries: 2, ttlMs: 10 });
+  const request = { source: f.path('source.sqlite'), query: accepted.delivery_id, secretFile: f.path('secret.key'),
+    verificationCache, archives: [{ artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') }] };
+  assert.equal((await locateHistory({ ...request, now: 100 })).verification_cache.misses, 1);
+  assert.equal((await locateHistory({ ...request, now: 109 })).verification_cache.hits, 1);
+  assert.equal((await locateHistory({ ...request, now: 110 })).verification_cache.misses, 1);
+  const manifestBytes = await readFile(f.path('archive.manifest.json'));
+  await writeFile(f.path('archive.manifest.json'), manifestBytes);
+  assert.equal((await locateHistory({ ...request, now: 111 })).verification_cache.misses, 1);
+  const changed = new DatabaseSync(f.path('archive.sqlite'));
+  try { changed.prepare('UPDATE events SET type = ? WHERE id = ?').run('tampered', accepted.event_id); }
+  finally { changed.close(); }
+  await assert.rejects(locateHistory({ ...request, now: 112 }), /checksum|metadata/);
+  const snapshot = verificationCache.snapshot();
+  assert.equal(snapshot.entries, 0);
+  assert.equal(snapshot.expirations, 1);
+  assert.equal(snapshot.invalidations, 2);
+  assert.equal(snapshot.misses, 4);
+});
+
+test('Archive verification cache enforces an LRU capacity and validates its bounds', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 37));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('one.manifest.json'),
+    secretFile: f.path('secret.key') });
+  await copyFile(f.path('one.manifest.json'), f.path('two.manifest.json'));
+  const cache = createArchiveVerificationCache({ maxEntries: 1, ttlMs: 1000 });
+  const common = { artifact: f.path('archive.sqlite'), secretFile: f.path('secret.key') };
+  assert.equal((await cache.verify({ ...common, manifest: f.path('one.manifest.json') }, 100)).status, 'miss');
+  assert.equal((await cache.verify({ ...common, manifest: f.path('two.manifest.json') }, 101)).status, 'miss');
+  assert.equal((await cache.verify({ ...common, manifest: f.path('one.manifest.json') }, 102)).status, 'miss');
+  assert.equal(cache.snapshot().entries, 1);
+  assert.equal(cache.snapshot().evictions, 2);
+  assert.throws(() => createArchiveVerificationCache({ maxEntries: 0 }), /1 to 100/);
+  assert.throws(() => createArchiveVerificationCache({ ttlMs: 3_600_001 }), /1 to 3600000/);
 });
 
 test('Archive checkpoint records a fully matched signed preservation boundary idempotently', async t => {

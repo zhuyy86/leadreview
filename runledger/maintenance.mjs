@@ -254,6 +254,99 @@ export async function verifyArtifactManifest({ artifact, manifest, secretFile })
     manifest_sha256: manifestSha256, details: inspected.details };
 }
 
+async function observeVerificationFiles({ artifact, manifest, secretFile }) {
+  const paths = [resolve(artifact), resolve(manifest), resolve(secretFile)];
+  const observations = await Promise.all(paths.map(async path => {
+    const info = await lstat(path, { bigint: true });
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error('Verification cache inputs must be regular files.');
+    return { path, info };
+  }));
+  return observations;
+}
+
+function sameVerificationObservations(left, right) {
+  return left.length === right.length && left.every((item, index) =>
+    item.path === right[index].path && sameFileObservation(item.info, right[index].info));
+}
+
+export function createArchiveVerificationCache({ maxEntries = 20, ttlMs = 60_000 } = {}) {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 100 ||
+      !Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 3_600_000) {
+    throw new TypeError('Verification cache requires 1 to 100 entries and a TTL of 1 to 3600000 milliseconds.');
+  }
+  const entries = new Map();
+  const counters = { hits: 0, misses: 0, coalesced: 0, invalidations: 0, expirations: 0, evictions: 0 };
+
+  function touch(key, entry) {
+    entries.delete(key);
+    entries.set(key, entry);
+  }
+
+  function removeOldest() {
+    while (entries.size >= maxEntries) {
+      entries.delete(entries.keys().next().value);
+      counters.evictions++;
+    }
+  }
+
+  return {
+    async verify({ artifact, manifest, secretFile }, now = Date.now()) {
+      if (![artifact, manifest, secretFile].every(value => typeof value === 'string' && value) ||
+          !Number.isSafeInteger(now) || now < 0) {
+        throw new TypeError('Cache verification requires artifact, manifest and secret paths plus a valid time.');
+      }
+      const request = { artifact: resolve(artifact), manifest: resolve(manifest), secretFile: resolve(secretFile) };
+      const key = canonicalJson(request);
+      const observed = await observeVerificationFiles(request);
+      const existing = entries.get(key);
+      if (existing) {
+        if (!sameVerificationObservations(existing.observations, observed)) {
+          entries.delete(key);
+          counters.invalidations++;
+        } else if (existing.state === 'pending') {
+          counters.coalesced++;
+          const verified = await existing.promise;
+          if (entries.get(key) === existing) touch(key, existing);
+          return { verified, observations: existing.observations, status: 'coalesced' };
+        } else if (now < existing.expiresAt) {
+          counters.hits++;
+          touch(key, existing);
+          return { verified: existing.verified, observations: existing.observations, status: 'hit' };
+        } else {
+          entries.delete(key);
+          counters.expirations++;
+        }
+      }
+
+      counters.misses++;
+      removeOldest();
+      const entry = { state: 'pending', observations: observed };
+      entries.set(key, entry);
+      entry.promise = (async () => {
+        try {
+          const verified = await verifyArtifactManifest(request);
+          const after = await observeVerificationFiles(request);
+          if (!sameVerificationObservations(observed, after)) {
+            throw new Error('Archive, manifest or secret changed during cached verification.');
+          }
+          entry.state = 'ready';
+          entry.verified = verified;
+          entry.observations = after;
+          entry.expiresAt = now + ttlMs;
+          return verified;
+        } catch (error) {
+          if (entries.get(key) === entry) entries.delete(key);
+          throw error;
+        }
+      })();
+      const verified = await entry.promise;
+      return { verified, observations: entry.observations, status: 'miss' };
+    },
+    clear() { entries.clear(); },
+    snapshot() { return { max_entries: maxEntries, ttl_ms: ttlMs, entries: entries.size, ...counters }; }
+  };
+}
+
 const archiveComparisonColumns = {
   events: ['id', 'idem_key', 'digest', 'type', 'created_at'],
   deliveries: ['id', 'event_id', 'status', 'generation', 'attempt_count', 'max_attempts', 'next_at',
@@ -559,9 +652,11 @@ function exactHistoryRows(path, query, validate) {
   } finally { db.close(); }
 }
 
-export async function locateHistory({ source, archives, secretFile, query }) {
+export async function locateHistory({ source, archives, secretFile, query, verificationCache, now = Date.now() }) {
   if (typeof source !== 'string' || !source || typeof secretFile !== 'string' || !secretFile ||
       typeof query !== 'string' || query.length < 1 || query.length > 256 ||
+      !Number.isSafeInteger(now) || now < 0 ||
+      (verificationCache !== undefined && (!verificationCache || typeof verificationCache.verify !== 'function')) ||
       !Array.isArray(archives) || archives.length < 1 || archives.length > 20 ||
       archives.some(item => !item || typeof item.artifact !== 'string' || !item.artifact ||
         typeof item.manifest !== 'string' || !item.manifest)) {
@@ -576,13 +671,31 @@ export async function locateHistory({ source, archives, secretFile, query }) {
 
   const candidates = exactHistoryRows(source, query, true).map(record => ({ record,
     location: { kind: 'active_ledger', path: source } }));
+  const cache = { hits: 0, misses: 0, coalesced: 0, bypassed: 0 };
   for (const item of resolved) {
-    const before = await lstat(item.artifact, { bigint: true });
-    const verified = await verifyArtifactManifest({ artifact: item.artifact, manifest: item.manifest, secretFile });
+    const request = { artifact: item.artifact, manifest: item.manifest, secretFile };
+    let verified;
+    let observations;
+    if (verificationCache) {
+      const cached = await verificationCache.verify(request, now);
+      verified = cached.verified;
+      observations = cached.observations;
+      cache[cached.status === 'hit' ? 'hits' : cached.status === 'coalesced' ? 'coalesced' : 'misses']++;
+    } else {
+      const before = await observeVerificationFiles(request);
+      verified = await verifyArtifactManifest(request);
+      observations = await observeVerificationFiles(request);
+      if (!sameVerificationObservations(before, observations)) {
+        throw new Error('Archive, manifest or secret changed during history verification.');
+      }
+      cache.bypassed++;
+    }
     if (verified.artifact_kind !== 'delivered_archive') throw new Error('History lookup accepts delivered archives only.');
     const rows = exactHistoryRows(item.artifact, query, false);
-    const after = await lstat(item.artifact, { bigint: true });
-    if (!sameFileObservation(before, after)) throw new Error('Archive changed during history lookup.');
+    const after = await observeVerificationFiles(request);
+    if (!sameVerificationObservations(observations, after)) {
+      throw new Error('Archive, manifest or secret changed during history lookup.');
+    }
     for (const record of rows) {
       candidates.push({ record, location: { kind: 'delivered_archive', path: item.artifact,
         manifest: item.manifest, artifact_sha256: verified.artifact_sha256,
@@ -603,7 +716,7 @@ export async function locateHistory({ source, archives, secretFile, query }) {
     }
     locations.push(candidate.location);
   }
-  return { source, query, archives_verified: resolved.length,
+  return { source, query, archives_verified: resolved.length, verification_cache: cache,
     matches: [...matches.values()].sort((left, right) => left.delivery_id.localeCompare(right.delivery_id)) };
 }
 
