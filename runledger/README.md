@@ -52,7 +52,7 @@ node verify-workload.mjs
 node verify-lookup.mjs
 ```
 
-- **92 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, indexed lookup plans, archive checkpoints, transactional payload compaction, database repacking, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **99 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, indexed lookup plans, bounded verification-cache freshness, archive checkpoints, transactional payload compaction, signed database activation, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -189,7 +189,26 @@ node maintenance.mjs locate-history \
 
 The command performs exact matching on delivery ID, event ID or idempotency key. Three index-directed branches use the primary/unique indexes in both the active ledger and each archive, then merge at most three candidates. A query-plan regression rejects scans of either base table and also verifies that one record matching two identity fields is returned once. The command validates the active ledger, authenticates and re-inspects every archive, observes stable artifact identity through lookup, then returns one logical match with every active/archive location. Artifact checksum and manifest creation time accompany archive locations. Identical copies merge by delivery ID; any difference in identity, type, timestamps, status, generation or attempt counters raises a conflict. Empty results still report how many archives were verified.
 
-The [recorded lookup workload](docs/lookup-workload.json) uses 20,000 active deliveries, a 10,000-row signed archive and 1,000 probes per database. On that local Linux/Node.js 24 run, prepared-query p50 changed from 9.469 ms to 0.008 ms for the active ledger and from 4.003 ms to 0.006 ms for the archive. Full verified queries measured 52-65 ms because they also perform HMAC, SHA-256, metadata, integrity and foreign-key checks. Reproduce with `node verify-lookup.mjs`; CI uses a smaller 2,000-row fixture and asserts index-directed query plans on Linux and Windows.
+Long-lived callers can share a bounded verification cache while keeping every lookup's file-identity guard:
+
+```js
+const verificationCache = createArchiveVerificationCache({
+  maxEntries: 20,
+  ttlMs: 60_000,
+});
+
+await locateHistory({
+  sourcePath,
+  archivePairs,
+  secretPath,
+  query,
+  verificationCache,
+});
+```
+
+The in-process LRU coalesces concurrent verification for the same archive/manifest/key tuple and reuses a successful result within its TTL. Every hit compares absolute path, device, inode, size, modification time and change time for the archive, manifest and secret key. The same observations are repeated after the archive query. Expiry, eviction or any identity/metadata change triggers full HMAC, SHA-256, SQLite integrity, foreign-key and metadata verification; a rejected verification is removed immediately. Each result reports request-level hit, miss, coalesced and bypassed counts. A one-shot CLI invocation starts with a cold cache.
+
+The [recorded lookup workload](docs/lookup-workload.json) uses 20,000 active deliveries, four signed copies of a 10,000-row archive and 1,000 probes per database. On that local Linux/Node.js 24 run, prepared-query p50 measured 0.007 ms for the active ledger and 0.006 ms for the archive. A lookup through four archives measured 97.99 ms with cold verification and 29.63 ms with identity-checked warm entries, a 3.3x difference in that run. Reproduce and refresh the report with `node verify-lookup.mjs --output docs/lookup-workload.json`; CI uses a smaller 2,000-row fixture with the same four-archive default and asserts index-directed plans on Linux and Windows.
 
 ### Signed archive checkpoints
 
