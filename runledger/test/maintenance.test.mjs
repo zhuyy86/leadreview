@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, historyLookupSql,
+import { activateRepackedLedger, archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, historyLookupSql,
   listArchiveCheckpoints,
   planRetention, repackLedger, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
@@ -29,7 +29,13 @@ async function fixture(t) {
     async noStaging() {
       assert.ok((await readdir(root)).every(name =>
         !name.startsWith('.runledger-snapshot-') && !name.startsWith('.runledger-archive-') &&
-        !name.startsWith('.runledger-manifest-') && !name.startsWith('.runledger-repack-')));
+        !name.startsWith('.runledger-manifest-') && !name.startsWith('.runledger-repack-') &&
+        !name.startsWith('.runledger-activate-')));
+    },
+    close(store) {
+      const index = stores.indexOf(store);
+      if (index >= 0) stores.splice(index, 1);
+      store.close();
     },
     open(name, options) {
       const store = openStore(join(root, name), options);
@@ -241,6 +247,90 @@ test('Repack CLI returns verifiable storage evidence and enforces its argument s
   await assert.rejects(execute(process.execPath, [...args, '--before', '1000']), error => error.code === 2);
   await assert.rejects(execute(process.execPath, [cli, 'repack', '--source', f.path('source.sqlite')]),
     error => error.code === 2);
+});
+
+test('Signed repack activation preserves the retired source and publishes the verified candidate atomically', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 1000);
+  source.finish(source.claim(1000), { outcome: 'delivered', httpStatus: 200 }, 1010);
+  source.receive(accepted.delivery_id, 1011);
+  f.close(source);
+  await repackLedger({ source: f.path('source.sqlite'), output: f.path('candidate.sqlite') });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 31));
+  const signed = await createArtifactManifest({ artifact: f.path('candidate.sqlite'),
+    output: f.path('candidate.manifest.json'), secretFile: f.path('secret.key') });
+  const result = await activateRepackedLedger({ source: f.path('source.sqlite'), candidate: f.path('candidate.sqlite'),
+    manifest: f.path('candidate.manifest.json'), secretFile: f.path('secret.key'), retired: f.path('retired.sqlite') });
+  assert.match(result.previous_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(result.activated_sha256, signed.artifact_sha256);
+  assert.equal(result.rollback_ready, true);
+  assert.deepEqual(result.counts, { events: 1, deliveries: 1, attempts: 1, inbox: 1 });
+  assert.equal(createHash('sha256').update(await readFile(f.path('source.sqlite'))).digest('hex'), signed.artifact_sha256);
+  assert.equal(createHash('sha256').update(await readFile(f.path('retired.sqlite'))).digest('hex'), result.previous_sha256);
+  const active = f.open('source.sqlite');
+  assert.deepEqual(active.ingest(event, 2000), { ...accepted, duplicate: true });
+  assert.deepEqual(active.receive(accepted.delivery_id, 2001), { status: 200, duplicate: true });
+  await f.noStaging();
+});
+
+test('Repack activation requires a quiescent source and an exact logical-state match', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 1000);
+  await repackLedger({ source: f.path('source.sqlite'), output: f.path('candidate.sqlite') });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 32));
+  await createArtifactManifest({ artifact: f.path('candidate.sqlite'), output: f.path('candidate.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), candidate: f.path('candidate.sqlite'),
+    manifest: f.path('candidate.manifest.json'), secretFile: f.path('secret.key'), retired: f.path('retired.sqlite') };
+  await assert.rejects(activateRepackedLedger(request), /Stop RunLedger|quiescent state/);
+  f.close(source);
+  const changed = f.open('source.sqlite');
+  changed.ingest({ ...event, key: 'after-repack' }, 1100);
+  f.close(changed);
+  await assert.rejects(activateRepackedLedger(request), /does not match the stopped source logical state/);
+  assert.equal(f.open('source.sqlite').overview().stats.queued, 2);
+  await assert.rejects(stat(f.path('retired.sqlite')), { code: 'ENOENT' });
+  await f.noStaging();
+});
+
+test('Competing repack activations select one winner and retain one rollback source', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 1000);
+  f.close(source);
+  await repackLedger({ source: f.path('source.sqlite'), output: f.path('candidate.sqlite') });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 33));
+  await createArtifactManifest({ artifact: f.path('candidate.sqlite'), output: f.path('candidate.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), candidate: f.path('candidate.sqlite'),
+    manifest: f.path('candidate.manifest.json'), secretFile: f.path('secret.key'), retired: f.path('retired.sqlite') };
+  const results = await Promise.allSettled([activateRepackedLedger(request), activateRepackedLedger(request)]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+  assert.equal(f.open('source.sqlite').overview().stats.queued, 1);
+  assert.equal(f.open('retired.sqlite').overview().stats.queued, 1);
+  await f.noStaging();
+});
+
+test('Activate-repack CLI emits signed handoff evidence and enforces its complete argument set', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 1000);
+  f.close(source);
+  await repackLedger({ source: f.path('source.sqlite'), output: f.path('candidate.sqlite') });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 34));
+  await createArtifactManifest({ artifact: f.path('candidate.sqlite'), output: f.path('candidate.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const args = [cli, 'activate-repack', '--source', f.path('source.sqlite'), '--candidate', f.path('candidate.sqlite'),
+    '--manifest', f.path('candidate.manifest.json'), '--secret-file', f.path('secret.key'),
+    '--retired', f.path('retired.sqlite')];
+  const result = JSON.parse((await execute(process.execPath, args)).stdout);
+  assert.equal(result.operation, 'activate-repack');
+  assert.equal(result.rollback_ready, true);
+  assert.match(result.logical_state_sha256, /^[0-9a-f]{64}$/);
+  await assert.rejects(execute(process.execPath, args.slice(0, -2)), error => error.code === 2);
 });
 
 test('Retention preview protects active/dead work, idempotency and inbox without modifying the ledger', async t => {

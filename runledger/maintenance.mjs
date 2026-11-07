@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { backup, DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -48,12 +48,62 @@ async function hashFile(path) {
   return hash.digest('hex');
 }
 
+const sqliteSidecarSuffixes = ['-wal', '-shm', '-journal'];
+
+async function assertPathsAbsent(paths, message) {
+  for (const path of paths) {
+    try {
+      await lstat(path);
+      throw new Error(message);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
   if (value !== null && typeof value === 'object') {
     return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}';
   }
   return JSON.stringify(value);
+}
+
+function sqliteValue(value) {
+  if (value === null) return ['null'];
+  if (Buffer.isBuffer(value)) return ['blob', value.toString('hex')];
+  if (typeof value === 'bigint') return ['integer', value.toString()];
+  if (typeof value === 'number') return ['number', Object.is(value, -0) ? '-0' : String(value)];
+  return [typeof value, value];
+}
+
+function quoteIdentifier(value) {
+  return '"' + value.replaceAll('"', '""') + '"';
+}
+
+function ledgerStateDigest(db) {
+  const counts = inspect(db);
+  const hash = createHash('sha256');
+  const schema = db.prepare(`
+    SELECT type, name, tbl_name, sql
+    FROM sqlite_schema
+    WHERE name NOT LIKE 'sqlite_%'
+    ORDER BY type, name
+  `).all();
+  hash.update(canonicalJson(schema));
+  const tables = schema.filter(row => row.type === 'table').map(row => row.name).sort();
+  let rows = 0;
+  for (const table of tables) {
+    const columns = db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map(row => row.name);
+    const order = columns.map(quoteIdentifier).join(', ');
+    const query = `SELECT * FROM ${quoteIdentifier(table)}${order ? ` ORDER BY ${order}` : ''}`;
+    hash.update('\n' + canonicalJson({ table, columns }) + '\n');
+    for (const row of db.prepare(query).iterate()) {
+      hash.update(canonicalJson(columns.map(column => sqliteValue(row[column]))) + '\n');
+      rows++;
+    }
+  }
+  return { sha256: hash.digest('hex'), tables: tables.length, rows, counts };
 }
 
 function sameFileObservation(first, second) {
@@ -846,6 +896,142 @@ export async function repackLedger({ source, output }) {
   }
 }
 
+export async function activateRepackedLedger({ source, candidate, manifest, secretFile, retired }) {
+  if (![source, candidate, manifest, secretFile, retired].every(value => typeof value === 'string' && value)) {
+    throw new TypeError('Provide source, candidate, manifest, secret key and retired-source file paths.');
+  }
+  source = resolve(source);
+  candidate = resolve(candidate);
+  manifest = resolve(manifest);
+  retired = resolve(retired);
+  const secret = resolve(secretFile);
+  const paths = [source, candidate, manifest, secret, retired];
+  if (new Set(paths.map(path => path.toLowerCase())).size !== paths.length) {
+    throw new Error('Activation paths must be distinct.');
+  }
+  const protectedSidecars = [source, candidate].flatMap(path =>
+    sqliteSidecarSuffixes.map(suffix => (path + suffix).toLowerCase()));
+  if (paths.some(path => protectedSidecars.includes(path.toLowerCase()))) {
+    throw new Error('Activation paths must be separate from SQLite sidecars.');
+  }
+  for (const path of [source, candidate, manifest, secret]) {
+    const info = await lstat(path, { bigint: true });
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error('Activation inputs must be regular files.');
+  }
+  const identities = await Promise.all([source, candidate, manifest, secret].map(path => lstat(path, { bigint: true })));
+  for (let left = 0; left < identities.length; left++) {
+    for (let right = left + 1; right < identities.length; right++) {
+      if (sameFileIdentity(identities[left], identities[right])) throw new Error('Activation inputs must be distinct files.');
+    }
+  }
+  await mkdir(dirname(retired), { recursive: true });
+  await assertPathsAbsent([retired, ...sqliteSidecarSuffixes.map(suffix => retired + suffix)],
+    'Retired source or its SQLite sidecar already exists; choose a new file path.');
+  await assertPathsAbsent(sqliteSidecarSuffixes.map(suffix => candidate + suffix),
+    'Candidate SQLite sidecars must be absent.');
+
+  const verified = await verifyArtifactManifest({ artifact: candidate, manifest, secretFile: secret });
+  if (verified.artifact_kind !== 'ledger_backup') {
+    throw new Error('Repack activation requires a signed RunLedger ledger candidate.');
+  }
+  const candidateBefore = await lstat(candidate, { bigint: true });
+  let staging;
+  let retiredLinked = false;
+  let published = false;
+  try {
+    staging = await mkdtemp(join(dirname(source), '.runledger-activate-'));
+    const temporary = join(staging, basename(source));
+    await copyFile(candidate, temporary);
+    await chmod(temporary, 0o600);
+    const temporaryHandle = await open(temporary, 'r+');
+    try { await temporaryHandle.sync(); } finally { await temporaryHandle.close(); }
+    if (await hashFile(temporary) !== verified.artifact_sha256) {
+      throw new Error('Staged candidate checksum differs from its signed manifest.');
+    }
+
+    const sourceDb = new DatabaseSync(source, { timeout: 4000 });
+    let sourceState;
+    try {
+      sourceDb.exec('PRAGMA busy_timeout = 4000');
+      const checkpoint = sourceDb.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      if (checkpoint.busy !== 0) throw new Error('Source WAL checkpoint could not acquire a quiescent state.');
+      const journal = Object.values(sourceDb.prepare('PRAGMA journal_mode = DELETE').get())[0];
+      if (journal !== 'delete') throw new Error('Stop RunLedger before activation; source journal mode remained active.');
+      sourceDb.exec('BEGIN EXCLUSIVE');
+      sourceState = ledgerStateDigest(sourceDb);
+      sourceDb.exec('COMMIT');
+    } catch (error) {
+      try { sourceDb.exec('ROLLBACK'); } catch {}
+      if (/locked|busy/i.test(error.message)) {
+        throw new Error('Stop RunLedger before activation; source remains in use.');
+      }
+      throw error;
+    } finally { sourceDb.close(); }
+    const sourceBefore = await lstat(source, { bigint: true });
+    const candidateDb = new DatabaseSync(temporary, { readOnly: true, timeout: 4000 });
+    let candidateState;
+    try {
+      candidateState = ledgerStateDigest(candidateDb);
+      if (candidateDb.prepare('PRAGMA freelist_count').get().freelist_count !== 0) {
+        throw new Error('Repack activation requires a compact candidate with zero free-list pages.');
+      }
+    }
+    finally { candidateDb.close(); }
+    if (sourceState.sha256 !== candidateState.sha256) {
+      throw new Error('Repacked candidate does not match the stopped source logical state.');
+    }
+
+    const sourceAfter = await lstat(source, { bigint: true });
+    const candidateAfter = await lstat(candidate, { bigint: true });
+    if (!sameFileObservation(sourceBefore, sourceAfter) || !sameFileObservation(candidateBefore, candidateAfter)) {
+      throw new Error('Source or candidate changed during activation verification.');
+    }
+    await assertPathsAbsent(sqliteSidecarSuffixes.flatMap(suffix => [source + suffix, candidate + suffix]),
+      'SQLite sidecar appeared during activation verification.');
+    const previousSha256 = await hashFile(source);
+    const sourceAfterHash = await lstat(source, { bigint: true });
+    if (!sameFileObservation(sourceAfter, sourceAfterHash)) {
+      throw new Error('Source changed while its pre-activation checksum was computed.');
+    }
+    await assertPathsAbsent(sqliteSidecarSuffixes.map(suffix => source + suffix),
+      'SQLite sidecar appeared while the source checksum was computed.');
+    await link(source, retired);
+    retiredLinked = true;
+    await rename(temporary, source);
+    published = true;
+
+    const activated = new DatabaseSync(source, { readOnly: true, timeout: 4000 });
+    let activatedState;
+    try { activatedState = ledgerStateDigest(activated); }
+    finally { activated.close(); }
+    const activatedSha256 = await hashFile(source);
+    if (activatedSha256 !== verified.artifact_sha256 || activatedState.sha256 !== candidateState.sha256) {
+      throw new Error('Activated database validation failed.');
+    }
+    return { source, candidate, manifest, retired, previous_sha256: previousSha256,
+      activated_sha256: activatedSha256, logical_state_sha256: activatedState.sha256,
+      tables_verified: activatedState.tables, rows_verified: activatedState.rows,
+      counts: activatedState.counts, manifest_sha256: verified.manifest_sha256,
+      activated_at: new Date().toISOString(), rollback_ready: true };
+  } catch (error) {
+    if (published) {
+      try {
+        await rename(retired, source);
+        retiredLinked = false;
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError],
+          `Activation failed and automatic rollback failed; recover the previous source from ${retired}.`);
+      }
+    } else if (retiredLinked) {
+      await rm(retired, { force: true });
+      retiredLinked = false;
+    }
+    throw error;
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true });
+  }
+}
+
 export async function snapshotLedger({ source, output, onProgress }) {
   if (typeof source !== 'string' || !source || typeof output !== 'string' || !output) {
     throw new TypeError('Provide source and output file paths.');
@@ -909,54 +1095,63 @@ export async function main(argv = process.argv.slice(2)) {
     parsed = parseArgs({ args: argv, allowPositionals: true,
       options: { source: { type: 'string' }, output: { type: 'string' }, before: { type: 'string' },
         artifact: { type: 'string' }, manifest: { type: 'string' }, 'secret-file': { type: 'string' },
+        candidate: { type: 'string' }, retired: { type: 'string' },
         archive: { type: 'string', multiple: true }, 'archive-manifest': { type: 'string', multiple: true },
         id: { type: 'string' } } });
     const operation = parsed.positionals[0];
     if (parsed.positionals.length !== 1) throw new Error();
     const archiveOptions = parsed.values.archive ?? [];
     const archiveManifestOptions = parsed.values['archive-manifest'] ?? [];
+    const activationOptions = [parsed.values.candidate, parsed.values.retired];
     if (operation === 'sign-manifest') {
       if (!parsed.values.artifact || !parsed.values.output || !parsed.values['secret-file'] || parsed.values.source ||
           parsed.values.manifest || parsed.values.before !== undefined || archiveOptions.length ||
-          archiveManifestOptions.length || parsed.values.id) throw new Error();
+          archiveManifestOptions.length || parsed.values.id || activationOptions.some(Boolean)) throw new Error();
     } else if (operation === 'verify-manifest') {
       if (!parsed.values.artifact || !parsed.values.manifest || !parsed.values['secret-file'] || parsed.values.source ||
           parsed.values.output || parsed.values.before !== undefined || archiveOptions.length ||
-          archiveManifestOptions.length || parsed.values.id) throw new Error();
+          archiveManifestOptions.length || parsed.values.id || activationOptions.some(Boolean)) throw new Error();
+    } else if (operation === 'activate-repack') {
+      if (!parsed.values.source || !parsed.values.candidate || !parsed.values.manifest ||
+          !parsed.values['secret-file'] || !parsed.values.retired || parsed.values.artifact || parsed.values.output ||
+          parsed.values.before !== undefined || archiveOptions.length || archiveManifestOptions.length || parsed.values.id) {
+        throw new Error();
+      }
     } else if (operation === 'locate-history') {
       if (!parsed.values.source || !parsed.values['secret-file'] || !parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
           archiveOptions.length < 1 || archiveOptions.length > 20 ||
-          archiveOptions.length !== archiveManifestOptions.length) throw new Error();
+          archiveOptions.length !== archiveManifestOptions.length || activationOptions.some(Boolean)) throw new Error();
     } else if (operation === 'checkpoint-archive') {
       if (!parsed.values.source || !parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
-          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1) throw new Error();
+          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1 || activationOptions.some(Boolean)) throw new Error();
     } else if (operation === 'compact-payloads') {
       if (!parsed.values.source || !parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
-          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1) throw new Error();
+          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1 || activationOptions.some(Boolean)) throw new Error();
     } else if (operation === 'list-checkpoints') {
       if (!parsed.values.source || parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
-          archiveOptions.length || archiveManifestOptions.length) throw new Error();
+          archiveOptions.length || archiveManifestOptions.length || activationOptions.some(Boolean)) throw new Error();
     } else if (!parsed.values.source || parsed.values.artifact || parsed.values.manifest || parsed.values['secret-file']) {
       throw new Error();
     } else if (operation === 'retention-plan') {
       if (parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
           Number(parsed.values.before) > 8640000000000000 || archiveOptions.length ||
-          archiveManifestOptions.length || parsed.values.id) throw new Error();
+          archiveManifestOptions.length || parsed.values.id || activationOptions.some(Boolean)) throw new Error();
     } else if (operation === 'archive') {
       if (!parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
           Number(parsed.values.before) > 8640000000000000 || archiveOptions.length ||
-          archiveManifestOptions.length || parsed.values.id) throw new Error();
+          archiveManifestOptions.length || parsed.values.id || activationOptions.some(Boolean)) throw new Error();
     } else if (!['backup', 'restore', 'repack'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined ||
-        archiveOptions.length || archiveManifestOptions.length || parsed.values.id) {
+        archiveOptions.length || archiveManifestOptions.length || parsed.values.id || activationOptions.some(Boolean)) {
       throw new Error();
     }
   } catch {
     console.error('Usage: node maintenance.mjs backup|restore --source ledger.sqlite --output new.sqlite');
     console.error('       node maintenance.mjs repack --source ledger.sqlite --output compacted.sqlite');
+    console.error('       node maintenance.mjs activate-repack --source ledger.sqlite --candidate compacted.sqlite --manifest compacted.manifest.json --secret-file key --retired retired.sqlite');
     console.error('       node maintenance.mjs archive --source ledger.sqlite --output archive.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs sign-manifest --artifact file.sqlite --output file.manifest.json --secret-file key');
@@ -975,6 +1170,9 @@ export async function main(argv = process.argv.slice(2)) {
       : operation === 'verify-manifest'
         ? await verifyArtifactManifest({ artifact: parsed.values.artifact, manifest: parsed.values.manifest,
           secretFile: parsed.values['secret-file'] })
+        : operation === 'activate-repack'
+          ? await activateRepackedLedger({ source: parsed.values.source, candidate: parsed.values.candidate,
+            manifest: parsed.values.manifest, secretFile: parsed.values['secret-file'], retired: parsed.values.retired })
         : operation === 'locate-history'
           ? await locateHistory({ source: parsed.values.source, secretFile: parsed.values['secret-file'],
             query: parsed.values.id, archives: parsed.values.archive.map((artifact, index) =>
