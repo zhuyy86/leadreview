@@ -1,6 +1,6 @@
 # LeadReview
 
-> **Featured project · [RunLedger](runledger)** — Follow an AI completion event through durable queuing, signed delivery, 503 retries and dead-letter replay. Includes indexed cross-archive lookup, checkpointed payload compaction, validated database repacking, 92 verification scenarios and reproducible workloads.
+> **Featured project · [RunLedger](runledger)** — Follow an AI completion event through durable queuing, signed delivery, 503 retries and dead-letter replay. Includes indexed cross-archive lookup, checkpointed payload compaction, signed database repack activation, 96 verification scenarios and reproducible workloads.
 ### Structured lead intake, deterministic decisions & API regression
 
 A JavaScript business-workflow project that separates input normalization, scoring and review routing from workflow orchestration. The repository also includes **API Contract Lab**, a standalone HTTP/JSON/SSE regression tool.

@@ -113,12 +113,15 @@ The [recorded local workload](docs/verification-workload.json) contains its obse
 
 ## Backup and recovery
 
-Run from this directory with Node.js 24. Both commands require a new output path:
+Run from this directory with Node.js 24. Backup, restore, repack, manifest and retired-source outputs use new paths:
 
 ```sh
 node maintenance.mjs backup --source data/runledger.sqlite --output backups/ledger.sqlite
 node maintenance.mjs restore --source backups/ledger.sqlite --output data/recovered.sqlite
 node maintenance.mjs repack --source data/runledger.sqlite --output maintenance/compacted.sqlite
+node maintenance.mjs sign-manifest --artifact maintenance/compacted.sqlite --output maintenance/compacted.manifest.json --secret-file backups/manifest.key
+# Stop RunLedger before the activation step.
+node maintenance.mjs activate-repack --source data/runledger.sqlite --candidate maintenance/compacted.sqlite --manifest maintenance/compacted.manifest.json --secret-file backups/manifest.key --retired maintenance/pre-repack.sqlite
 ```
 
 Backup uses Node.js's [SQLite online backup API](https://nodejs.org/download/release/v24.0.0/docs/api/sqlite.html#sqlitebackupsourceDb-path-options). A read transaction pins one committed snapshot while WAL writers continue. The resulting standalone file includes committed WAL pages, events, deliveries, leases, all replay generations and inbox receipts. Changes committed after the pinned snapshot are outside its recovery point. A long read snapshot can keep WAL pages alive until copying finishes.
@@ -134,6 +137,10 @@ Recovery tests include uncheckpointed WAL, replay and inbox persistence, lease r
 `repack` uses SQLite `VACUUM INTO` against a read-only connection to produce a new compact candidate from one committed snapshot. It validates the source first, validates the candidate and its foreign keys, requires zero output free-list pages, switches the candidate to standalone DELETE-journal mode, file-syncs it and publishes through an exclusive hard link. The JSON result records SHA-256, row counts, source/output page observations and their logical byte delta. It also verifies that the source path still names the same file identity before publication. The live database path stays unchanged; perform any switchover through the explicit stop-and-restore procedure above.
 
 Repack tests carry uncheckpointed WAL state, idempotency, latency populations, archive checkpoints, compaction receipts and event mappings into the candidate. Fault cases cover malformed sources, path aliases, existing targets and competing publishers. Source page observations can change across concurrent workloads, and logical page deltas describe this snapshot rather than durable storage savings. Directory fsync, encrypted storage and secure erasure remain deployment-specific operations.
+
+`activate-repack` closes the maintenance loop for a stopped ledger. It authenticates the candidate manifest, copies and file-syncs the candidate on the source filesystem, checkpoints the source WAL and requires DELETE-journal mode. It then hashes every user schema object and every typed value in every table in deterministic order. Activation proceeds only when the source and candidate logical-state digests match and the candidate has zero free-list pages.
+
+The predecessor is first published at the new `--retired` path through an exclusive hard link. A rename then replaces the source path atomically on the same filesystem. The activated file is re-inspected and its SHA-256 and logical digest are checked again; a validation failure restores the retired source automatically. The result records the previous and activated checksums, manifest checksum, logical-state checksum, verified table/row counts and `rollback_ready`. Keep the application stopped for this command and start it only after success. The original signed candidate stays available, and the retired path is a directly usable rollback database. Source drift after candidate creation, an open source connection, candidate sidecars, signature changes, path aliases, existing rollback targets and competing activations all stop publication.
 
 ### Signed offline artifact manifests
 
