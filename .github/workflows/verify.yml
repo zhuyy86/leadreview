@@ -33,6 +33,8 @@ jobs:
         run: node runledger/verify-workload.mjs
       - name: Verify delivered-history archive preservation
         run: node runledger/verify-archive.mjs --deliveries 100
+      - name: Verify indexed active and archive lookup
+        run: node runledger/verify-lookup.mjs --deliveries 2000 --probes 200
 
   browser:
     runs-on: ubuntu-latest

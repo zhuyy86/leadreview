@@ -1,0 +1,89 @@
+{
+  "observed_at": "2026-11-07T10:58:53.753Z",
+  "node": "v24.22.1",
+  "platform": "linux",
+  "source_deliveries": 20000,
+  "archived_deliveries": 10000,
+  "probes_per_database": 1000,
+  "source_query_plan": [
+    "CO-ROUTINE matches",
+    "MERGE (UNION)",
+    "LEFT",
+    "MERGE (UNION)",
+    "LEFT",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_1 (id=?)",
+    "SEARCH e USING INDEX sqlite_autoindex_events_1 (id=?)",
+    "RIGHT",
+    "SEARCH e USING INDEX sqlite_autoindex_events_1 (id=?)",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_2 (event_id=?)",
+    "RIGHT",
+    "SEARCH e USING INDEX sqlite_autoindex_events_2 (idem_key=?)",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_2 (event_id=?)",
+    "SCAN matches",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ],
+  "archive_query_plan": [
+    "CO-ROUTINE matches",
+    "MERGE (UNION)",
+    "LEFT",
+    "MERGE (UNION)",
+    "LEFT",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_1 (id=?)",
+    "SEARCH e USING INDEX sqlite_autoindex_events_1 (id=?)",
+    "RIGHT",
+    "SEARCH e USING INDEX sqlite_autoindex_events_1 (id=?)",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_2 (event_id=?)",
+    "RIGHT",
+    "SEARCH e USING INDEX sqlite_autoindex_events_2 (idem_key=?)",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_2 (event_id=?)",
+    "SCAN matches",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ],
+  "prior_source_query_plan": [
+    "SCAN d USING INDEX deliveries_created",
+    "SEARCH e USING INDEX sqlite_autoindex_events_1 (id=?)"
+  ],
+  "prior_archive_query_plan": [
+    "SCAN e",
+    "SEARCH d USING INDEX sqlite_autoindex_deliveries_2 (event_id=?)",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ],
+  "source_kernel": {
+    "probes": 1000,
+    "min_ms": 0.004,
+    "p50_ms": 0.008,
+    "p95_ms": 0.012,
+    "max_ms": 0.269
+  },
+  "archive_kernel": {
+    "probes": 1000,
+    "min_ms": 0.005,
+    "p50_ms": 0.006,
+    "p95_ms": 0.023,
+    "max_ms": 0.207
+  },
+  "prior_source_kernel": {
+    "probes": 1000,
+    "min_ms": 8.235,
+    "p50_ms": 9.469,
+    "p95_ms": 11.149,
+    "max_ms": 16.108
+  },
+  "prior_archive_kernel": {
+    "probes": 1000,
+    "min_ms": 3.543,
+    "p50_ms": 4.003,
+    "p95_ms": 4.931,
+    "max_ms": 9.612
+  },
+  "p50_improvement": {
+    "source_times": 1183.6,
+    "archive_times": 667.2
+  },
+  "verified_lookup_ms": {
+    "archived_match": 64.77,
+    "active_only_match": 51.91,
+    "missing": 52.74
+  },
+  "scope": "Local temporary SQLite files. Kernel timings cover prepared exact-identity SQL only; verified timings also include source integrity checks plus archive HMAC, SHA-256, metadata, integrity and foreign-key verification."
+}

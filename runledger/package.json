@@ -8,6 +8,7 @@
     "start": "node server.mjs",
     "test": "node --test",
     "verify": "node verify-workload.mjs",
-    "verify:archive": "node verify-archive.mjs"
+    "verify:archive": "node verify-archive.mjs",
+    "verify:lookup": "node verify-lookup.mjs"
   }
 }

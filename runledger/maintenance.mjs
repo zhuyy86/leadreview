@@ -478,18 +478,34 @@ export function listArchiveCheckpoints({ source }) {
   } finally { db.close(); }
 }
 
+const historyProjection = `
+  d.id AS delivery_id, e.id AS event_id, e.idem_key, e.digest, e.type,
+  e.created_at AS event_created_at, d.status, d.generation, d.attempt_count,
+  d.max_attempts, d.created_at AS delivery_created_at
+`;
+
+export const historyLookupSql = `
+  WITH matches AS (
+    SELECT ${historyProjection}
+    FROM deliveries d JOIN events e ON e.id = d.event_id
+    WHERE d.id = ?
+    UNION
+    SELECT ${historyProjection}
+    FROM events e JOIN deliveries d ON d.event_id = e.id
+    WHERE e.id = ?
+    UNION
+    SELECT ${historyProjection}
+    FROM events e JOIN deliveries d ON d.event_id = e.id
+    WHERE e.idem_key = ?
+  )
+  SELECT * FROM matches ORDER BY delivery_created_at, delivery_id
+`;
+
 function exactHistoryRows(path, query, validate) {
   const db = new DatabaseSync(path, { readOnly: true, timeout: 4000 });
   try {
     if (validate) inspect(db);
-    return db.prepare(`
-      SELECT d.id AS delivery_id, e.id AS event_id, e.idem_key, e.digest, e.type,
-        e.created_at AS event_created_at, d.status, d.generation, d.attempt_count,
-        d.max_attempts, d.created_at AS delivery_created_at
-      FROM events e JOIN deliveries d ON d.event_id = e.id
-      WHERE d.id = ? OR e.id = ? OR e.idem_key = ?
-      ORDER BY d.created_at, d.id
-    `).all(query, query, query).map(row => ({ ...row }));
+    return db.prepare(historyLookupSql).all(query, query, query).map(row => ({ ...row }));
   } finally { db.close(); }
 }
 

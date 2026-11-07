@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, listArchiveCheckpoints,
+import { archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, historyLookupSql,
+  listArchiveCheckpoints,
   planRetention, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
@@ -588,6 +589,37 @@ test('History lookup CLI returns verified locations and enforces paired argument
   await assert.rejects(execute(process.execPath, args.filter((_, index) => ![6, 7].includes(index))),
     error => error.code === 2);
   await assert.rejects(execute(process.execPath, [...args, '--output', f.path('extra')]), error => error.code === 2);
+});
+
+test('Exact history lookup uses identity indexes and merges cross-field matches once', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const editor = new DatabaseSync(f.path('source.sqlite'));
+  try { editor.prepare('UPDATE events SET idem_key = ? WHERE id = ?').run(accepted.delivery_id, accepted.event_id); }
+  finally { editor.close(); }
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 28));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  for (const path of [f.path('source.sqlite'), f.path('archive.sqlite')]) {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const details = db.prepare('EXPLAIN QUERY PLAN ' + historyLookupSql)
+        .all(accepted.delivery_id, accepted.delivery_id, accepted.delivery_id).map(row => row.detail);
+      assert.equal(details.some(detail => /^SCAN [de](?:\s|$)/.test(detail)), false);
+      assert.ok(details.filter(detail => detail.startsWith('SEARCH d USING INDEX')).length >= 3);
+      assert.ok(details.filter(detail => detail.startsWith('SEARCH e USING INDEX')).length >= 3);
+    } finally { db.close(); }
+  }
+  const result = await locateHistory({ source: f.path('source.sqlite'), query: accepted.delivery_id,
+    secretFile: f.path('secret.key'), archives: [
+      { artifact: f.path('archive.sqlite'), manifest: f.path('archive.manifest.json') }
+    ] });
+  assert.equal(result.matches.length, 1);
+  assert.deepEqual(result.matches[0].locations.map(location => location.kind),
+    ['active_ledger', 'delivered_archive']);
 });
 
 test('Archive checkpoint records a fully matched signed preservation boundary idempotently', async t => {
