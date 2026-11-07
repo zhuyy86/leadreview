@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { archiveDelivered, createArtifactManifest, planRetention, snapshotLedger,
+import { archiveDelivered, checkpointArchive, createArtifactManifest, listArchiveCheckpoints,
+  planRetention, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
@@ -587,4 +588,135 @@ test('History lookup CLI returns verified locations and enforces paired argument
   await assert.rejects(execute(process.execPath, args.filter((_, index) => ![6, 7].includes(index))),
     error => error.code === 2);
   await assert.rejects(execute(process.execPath, [...args, '--output', f.path('extra')]), error => error.code === 2);
+});
+
+test('Archive checkpoint records a fully matched signed preservation boundary idempotently', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'dead', httpStatus: 503 }, 110);
+  source.replayMany({ operation_key: 'checkpoint-replay',
+    deliveries: [{ id: accepted.delivery_id, generation: 1 }] }, 120);
+  source.finish(source.claim(120), { outcome: 'delivered', httpStatus: 200 }, 130);
+  source.receive(accepted.delivery_id, 131);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 16));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  const first = await checkpointArchive({ ...request, now: 2000 });
+  const second = await checkpointArchive({ ...request, now: 3000 });
+  assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(second.registered_at, 2000);
+  assert.equal(first.manifest_sha256,
+    createHash('sha256').update(await readFile(f.path('archive.manifest.json'))).digest('hex'));
+  assert.deepEqual(first.counts, { events: 1, deliveries: 1, attempts: 2, inbox: 1, operator_actions: 1 });
+  assert.deepEqual(listArchiveCheckpoints({ source: f.path('source.sqlite') }).checkpoints.map(row => ({
+    artifact_sha256: row.artifact_sha256, registered_at: row.registered_at, counts: row.counts
+  })), [{ artifact_sha256: first.artifact_sha256, registered_at: 2000, counts: first.counts }]);
+  const db = new DatabaseSync(f.path('source.sqlite'), { readOnly: true });
+  try {
+    const row = db.prepare('SELECT * FROM archive_checkpoints').get();
+    assert.equal(row.artifact_sha256, first.artifact_sha256);
+    assert.equal(row.manifest_sha256, first.manifest_sha256);
+    assert.equal(row.before_ms, 1000);
+    assert.deepEqual(JSON.parse(row.counts), first.counts);
+  } finally { db.close(); }
+});
+
+test('Archive checkpoint rolls back when source history drifted after archive creation', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const accepted = source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 17));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  await checkpointArchive({ ...request, now: 2000 });
+  const db = new DatabaseSync(f.path('source.sqlite'));
+  try { db.prepare('UPDATE deliveries SET attempt_count = 7 WHERE id = ?').run(accepted.delivery_id); }
+  finally { db.close(); }
+  await assert.rejects(checkpointArchive({ ...request, now: 3000 }), /deliveries/);
+  const checked = new DatabaseSync(f.path('source.sqlite'), { readOnly: true });
+  try { assert.equal(checked.prepare('SELECT count(*) AS count FROM archive_checkpoints').get().count, 1); }
+  finally { checked.close(); }
+});
+
+test('Archive checkpoint rejects a validly signed archive whose rows differ from source', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered', httpStatus: 200 }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  const archive = new DatabaseSync(f.path('archive.sqlite'));
+  try { archive.exec('UPDATE attempts SET http_status = 201'); } finally { archive.close(); }
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 18));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  await assert.rejects(checkpointArchive({ source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') }), /attempts/);
+});
+
+test('Archive checkpoint supports a legacy source with no operator receipt table', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  const legacy = new DatabaseSync(f.path('source.sqlite'));
+  try { legacy.exec('DROP TABLE operator_actions'); } finally { legacy.close(); }
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 19));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const result = await checkpointArchive({ source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key'), now: 2000 });
+  assert.equal(result.counts.operator_actions, 0);
+  assert.equal(result.duplicate, false);
+});
+
+test('Online backup preserves registered archive checkpoints', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 20));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const checkpoint = await checkpointArchive({ source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key'), now: 2000 });
+  await snapshotLedger({ source: f.path('source.sqlite'), output: f.path('backup.sqlite') });
+  const backup = new DatabaseSync(f.path('backup.sqlite'), { readOnly: true });
+  try {
+    assert.equal(backup.prepare('SELECT artifact_sha256 FROM archive_checkpoints').get().artifact_sha256,
+      checkpoint.artifact_sha256);
+  } finally { backup.close(); }
+});
+
+test('Archive checkpoint CLI serializes concurrent registration and validates one pair', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest(event, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 21));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const args = [cli, 'checkpoint-archive', '--source', f.path('source.sqlite'), '--archive', f.path('archive.sqlite'),
+    '--archive-manifest', f.path('archive.manifest.json'), '--secret-file', f.path('secret.key')];
+  const results = await Promise.all([execute(process.execPath, args), execute(process.execPath, args)]);
+  assert.deepEqual(results.map(result => JSON.parse(result.stdout).duplicate).sort(), [false, true]);
+  const listed = JSON.parse((await execute(process.execPath,
+    [cli, 'list-checkpoints', '--source', f.path('source.sqlite')])).stdout);
+  assert.equal(listed.checkpoints.length, 1);
+  assert.equal(listed.checkpoints[0].counts.deliveries, 1);
+  await assert.rejects(execute(process.execPath, [...args, '--archive', f.path('extra')]),
+    error => error.code === 2);
+  await assert.rejects(execute(process.execPath, [...args, '--output', f.path('extra')]),
+    error => error.code === 2);
 });

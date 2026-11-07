@@ -117,6 +117,15 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
       result TEXT NOT NULL
     ) STRICT;
     CREATE INDEX IF NOT EXISTS operator_actions_created ON operator_actions(created_at DESC, id DESC);
+    CREATE TABLE IF NOT EXISTS archive_checkpoints (
+      artifact_sha256 TEXT PRIMARY KEY CHECK (length(artifact_sha256) = 64),
+      artifact_name TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+      manifest_created_at TEXT NOT NULL,
+      before_ms INTEGER NOT NULL,
+      counts TEXT NOT NULL CHECK (json_valid(counts)),
+      registered_at INTEGER NOT NULL
+    ) STRICT;
   `);
 
   function transaction(callback, write = true) {

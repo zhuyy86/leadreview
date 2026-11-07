@@ -17,7 +17,9 @@ const requiredColumns = {
 };
 const optionalColumns = {
   dispatch_control: ['id', 'paused', 'revision', 'updated_at'],
-  operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result']
+  operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result'],
+  archive_checkpoints: ['artifact_sha256', 'artifact_name', 'manifest_sha256', 'manifest_created_at',
+    'before_ms', 'counts', 'registered_at']
 };
 
 function inspect(db) {
@@ -164,8 +166,15 @@ export async function verifyArtifactManifest({ artifact, manifest, secretFile })
   if (sameFileIdentity(artifactInfo, manifestInfo) || sameFileIdentity(artifactInfo, secret.info) ||
       sameFileIdentity(manifestInfo, secret.info)) throw new Error('Artifact, manifest and secret key must be distinct files.');
   let document;
-  try { document = JSON.parse(await readFile(manifest, 'utf8')); }
+  let manifestBytes;
+  try {
+    manifestBytes = await readFile(manifest);
+    document = JSON.parse(manifestBytes.toString('utf8'));
+  }
   catch (error) { throw new Error('Manifest is not valid JSON: ' + error.message); }
+  const manifestAfterRead = await lstat(manifest, { bigint: true });
+  if (!sameFileObservation(manifestInfo, manifestAfterRead)) throw new Error('Manifest changed while being verified.');
+  const manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex');
   const expectedKeys = ['artifact_bytes', 'artifact_kind', 'artifact_name', 'artifact_sha256', 'created_at', 'details', 'signature', 'version'];
   if (!document || Array.isArray(document) || canonicalJson(Object.keys(document).sort()) !== canonicalJson(expectedKeys) ||
       document.version !== 1 || !document.signature || document.signature.algorithm !== 'hmac-sha256' ||
@@ -188,7 +197,121 @@ export async function verifyArtifactManifest({ artifact, manifest, secretFile })
     throw new Error('Artifact contents do not match the manifest metadata.');
   }
   return { verified: true, artifact, manifest, artifact_kind: inspected.kind,
-    artifact_bytes: Number(info.size), artifact_sha256: sha256, created_at: body.created_at };
+    artifact_bytes: Number(info.size), artifact_sha256: sha256, created_at: body.created_at,
+    manifest_sha256: manifestSha256, details: inspected.details };
+}
+
+const archiveComparisonColumns = {
+  events: ['id', 'idem_key', 'digest', 'type', 'payload', 'created_at'],
+  deliveries: ['id', 'event_id', 'status', 'generation', 'attempt_count', 'max_attempts', 'next_at',
+    'created_at', 'lease_until', 'lease_token', 'last_error'],
+  attempts: ['token', 'delivery_id', 'generation', 'number', 'started_at', 'finished_at', 'outcome',
+    'http_status', 'error'],
+  inbox: ['delivery_id', 'accepted_at'],
+  operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result']
+};
+
+export async function checkpointArchive({ source, archive, manifest, secretFile, now = Date.now() }) {
+  if (![source, archive, manifest, secretFile].every(value => typeof value === 'string' && value) ||
+      !Number.isSafeInteger(now) || now < 0) {
+    throw new TypeError('Provide source, archive, manifest and secret key paths plus a valid registration time.');
+  }
+  source = resolve(source);
+  archive = resolve(archive);
+  manifest = resolve(manifest);
+  secretFile = resolve(secretFile);
+  const sourceInfo = await lstat(source, { bigint: true });
+  const archiveBefore = await lstat(archive, { bigint: true });
+  const manifestBefore = await lstat(manifest, { bigint: true });
+  const secretInfo = await lstat(secretFile, { bigint: true });
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isFile() || sameFileIdentity(sourceInfo, archiveBefore) ||
+      sameFileIdentity(sourceInfo, manifestBefore) || sameFileIdentity(sourceInfo, secretInfo)) {
+    throw new Error('Source, archive, manifest and secret key must be distinct regular files.');
+  }
+  const verified = await verifyArtifactManifest({ artifact: archive, manifest, secretFile });
+  if (verified.artifact_kind !== 'delivered_archive') throw new Error('Archive checkpoint requires a delivered archive.');
+
+  const db = new DatabaseSync(source, { timeout: 4000 });
+  let attached = false;
+  let transaction = false;
+  try {
+    db.exec('PRAGMA busy_timeout = 4000; PRAGMA foreign_keys = ON;');
+    db.prepare('ATTACH DATABASE ? AS archived').run(archive);
+    attached = true;
+    db.exec('BEGIN IMMEDIATE');
+    transaction = true;
+    inspect(db);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS archive_checkpoints (
+        artifact_sha256 TEXT PRIMARY KEY CHECK (length(artifact_sha256) = 64),
+        artifact_name TEXT NOT NULL,
+        manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+        manifest_created_at TEXT NOT NULL,
+        before_ms INTEGER NOT NULL,
+        counts TEXT NOT NULL CHECK (json_valid(counts)),
+        registered_at INTEGER NOT NULL
+      ) STRICT
+    `);
+    for (const [table, columns] of Object.entries(archiveComparisonColumns)) {
+      const sourceTable = db.prepare("SELECT type FROM main.sqlite_schema WHERE name = ?").get(table);
+      if (!sourceTable && table === 'operator_actions' && verified.details.counts.operator_actions === 0) continue;
+      if (sourceTable?.type !== 'table') throw new Error('Source is missing archived table ' + table + '.');
+      const projection = columns.join(', ');
+      const mismatch = db.prepare(`
+        SELECT 1 FROM (
+          SELECT ${projection} FROM archived.${table}
+          EXCEPT
+          SELECT ${projection} FROM main.${table}
+        ) LIMIT 1
+      `).get();
+      if (mismatch) throw new Error('Archive rows diverge from source table ' + table + '.');
+    }
+    const archiveAfter = await lstat(archive, { bigint: true });
+    if (!sameFileObservation(archiveBefore, archiveAfter)) throw new Error('Archive changed during checkpoint registration.');
+    const manifestAfter = await lstat(manifest, { bigint: true });
+    if (!sameFileObservation(manifestBefore, manifestAfter)) throw new Error('Manifest changed during checkpoint registration.');
+    const existing = db.prepare('SELECT * FROM archive_checkpoints WHERE artifact_sha256 = ?')
+      .get(verified.artifact_sha256);
+    if (existing) {
+      db.exec('COMMIT');
+      transaction = false;
+      return { source, archive, manifest, artifact_sha256: existing.artifact_sha256,
+        manifest_sha256: existing.manifest_sha256, before_ms: existing.before_ms,
+        counts: JSON.parse(existing.counts), registered_at: existing.registered_at, duplicate: true };
+    }
+    const counts = canonicalJson(verified.details.counts);
+    db.prepare('INSERT INTO archive_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      verified.artifact_sha256, basename(archive), verified.manifest_sha256, verified.created_at,
+      verified.details.before_ms, counts, now
+    );
+    db.exec('COMMIT');
+    transaction = false;
+    return { source, archive, manifest, artifact_sha256: verified.artifact_sha256,
+      manifest_sha256: verified.manifest_sha256, before_ms: verified.details.before_ms,
+      counts: verified.details.counts, registered_at: now, duplicate: false };
+  } catch (error) {
+    if (transaction) db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    if (attached) db.exec('DETACH DATABASE archived');
+    db.close();
+  }
+}
+
+export function listArchiveCheckpoints({ source }) {
+  if (typeof source !== 'string' || !source) throw new TypeError('Provide a source database path.');
+  source = resolve(source);
+  const db = new DatabaseSync(source, { readOnly: true, timeout: 4000 });
+  try {
+    inspect(db);
+    const table = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'archive_checkpoints'").get();
+    if (!table) return { source, checkpoints: [] };
+    return { source, checkpoints: db.prepare(`
+      SELECT artifact_sha256, artifact_name, manifest_sha256, manifest_created_at,
+        before_ms, counts, registered_at
+      FROM archive_checkpoints ORDER BY registered_at DESC, artifact_sha256
+    `).all().map(row => ({ ...row, counts: JSON.parse(row.counts) })) };
+  } finally { db.close(); }
 }
 
 function exactHistoryRows(path, query, validate) {
@@ -538,6 +661,14 @@ export async function main(argv = process.argv.slice(2)) {
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
           archiveOptions.length < 1 || archiveOptions.length > 20 ||
           archiveOptions.length !== archiveManifestOptions.length) throw new Error();
+    } else if (operation === 'checkpoint-archive') {
+      if (!parsed.values.source || !parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
+          parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
+          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1) throw new Error();
+    } else if (operation === 'list-checkpoints') {
+      if (!parsed.values.source || parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
+          parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
+          archiveOptions.length || archiveManifestOptions.length) throw new Error();
     } else if (!parsed.values.source || parsed.values.artifact || parsed.values.manifest || parsed.values['secret-file']) {
       throw new Error();
     } else if (operation === 'retention-plan') {
@@ -559,6 +690,8 @@ export async function main(argv = process.argv.slice(2)) {
     console.error('       node maintenance.mjs sign-manifest --artifact file.sqlite --output file.manifest.json --secret-file key');
     console.error('       node maintenance.mjs verify-manifest --artifact file.sqlite --manifest file.manifest.json --secret-file key');
     console.error('       node maintenance.mjs locate-history --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key --id value');
+    console.error('       node maintenance.mjs checkpoint-archive --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key');
+    console.error('       node maintenance.mjs list-checkpoints --source ledger.sqlite');
     return 2;
   }
   try {
@@ -573,6 +706,11 @@ export async function main(argv = process.argv.slice(2)) {
           ? await locateHistory({ source: parsed.values.source, secretFile: parsed.values['secret-file'],
             query: parsed.values.id, archives: parsed.values.archive.map((artifact, index) =>
               ({ artifact, manifest: parsed.values['archive-manifest'][index] })) })
+        : operation === 'checkpoint-archive'
+          ? await checkpointArchive({ source: parsed.values.source, archive: parsed.values.archive[0],
+            manifest: parsed.values['archive-manifest'][0], secretFile: parsed.values['secret-file'] })
+        : operation === 'list-checkpoints'
+          ? listArchiveCheckpoints({ source: parsed.values.source })
         : operation === 'retention-plan'
           ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
           : operation === 'archive'
