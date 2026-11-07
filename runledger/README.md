@@ -51,7 +51,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **81 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, archive checkpoints, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **87 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, archive checkpoints, transactional payload compaction, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -191,7 +191,26 @@ node maintenance.mjs list-checkpoints --source data/runledger.sqlite
 
 Registration authenticates the manifest and observes stable archive and manifest identities. Under one `BEGIN IMMEDIATE` source transaction it compares every archived event, delivery, attempt, inbox receipt and replay-operation receipt against the source, including nullable fields. A differing or missing row rolls back the registration. A matching archive writes its artifact SHA-256, manifest SHA-256, signed cutoff, signed row counts and registration time to `archive_checkpoints`. The artifact hash is the idempotency key: concurrent processes produce one record, while repeated registration revalidates every source row before returning the original checkpoint. Online backup and restore carry this table with the ledger.
 
-This checkpoint is durable evidence that the signed archive matched one locked source snapshot. Source rows remain present and live metrics keep their current populations. A later cleanup command must define which identities, inbox receipts, metrics and operator records stay online before it can consume the checkpoint.
+This checkpoint is durable evidence that the signed archive matched one locked source snapshot. Source rows remain present and live metrics keep their current populations.
+
+### Checkpointed payload compaction
+
+After checkpoint registration, compact larger completed-event payloads in the source ledger:
+
+```sh
+node maintenance.mjs compact-payloads \
+  --source data/runledger.sqlite \
+  --archive archives/2026-10.sqlite \
+  --archive-manifest archives/2026-10.manifest.json \
+  --secret-file /secure/runledger-archive.key
+node maintenance.mjs list-checkpoints --source data/runledger.sqlite
+```
+
+The command reauthenticates and re-inspects the signed archive, requires its recorded manifest hash, takes a source `BEGIN IMMEDIATE` lock and repeats the full row comparison. It then replaces only archived payloads larger than `{"_runledger_archived":true}` with that canonical marker. Event and delivery IDs, idempotency keys and digests, all attempt generations, inbox receipts, replay-operation receipts, timestamps and exact latency populations remain unchanged. Smaller payloads remain byte-for-byte intact.
+
+The payload updates, per-event archive mappings and one compaction receipt commit in the same transaction. The receipt records scanned and changed event counts plus logical UTF-8 bytes before and after. A trigger-induced mid-update failure rolls back the complete batch. Concurrent processes return one new receipt and one revalidated duplicate result. Online backup retains both tracking tables, and later retention plans and archives skip mapped events so the marker cannot replace original history in a newer archive.
+
+Logical bytes describe live payload values. SQLite pages, WAL records and free space follow SQLite storage lifecycle; physical reclamation and secure erasure are separate operations. The signed archive remains the source for original payload retrieval.
 
 
 ## Dispatch operations

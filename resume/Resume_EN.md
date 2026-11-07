@@ -17,8 +17,8 @@ Delivers AI job completion events and exposes retries, receiver outages and dead
 - Commits events and queue records together. Canonical payloads deduplicate by idempotency key; conflicts return HTTP 409. Expiring leases fence stale worker completions.
 - Signs HTTP bodies with HMAC. A persistent inbox deduplicates redelivery after a lost acknowledgment; replay preserves delivery IDs and earlier attempt generations.
 - Adds persistent dispatch pause/resume and atomic batch replay with expected-generation checks, idempotent operation receipts and an audit view. Verifies competing operator processes and lost-response recovery.
-- Exposes full-ledger search, queue health and replay-aware p50/p95/p99 latency. Exact lookup verifies up to 20 signed archives; transactional checkpoints require full source-row matches and persist artifact/manifest hashes.
-- Eighty-one Node.js scenarios cover recovery, archives, signed artifacts and HTTP contracts. Local exercises delivered 100 unique events from 200 requests and archived 250 of 500 histories with verified receipts. Linux/Windows and browser CI pass.
+- Exposes full-ledger search, queue health and replay-aware p50/p95/p99 latency. Signed checkpoints require full source-row matches; transactional compaction revalidates them before replacing larger archived payloads while retaining identities, receipts, attempts, audits and metrics.
+- Eighty-seven Node.js scenarios cover recovery, archives, signed artifacts, compaction rollback/concurrency and HTTP contracts. Local exercises delivered 100 unique events from 200 requests and archived 250 of 500 histories with verified receipts. Linux/Windows and browser CI pass.
 
 ## Selected Projects
 
