@@ -19,7 +19,10 @@ const optionalColumns = {
   dispatch_control: ['id', 'paused', 'revision', 'updated_at'],
   operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result'],
   archive_checkpoints: ['artifact_sha256', 'artifact_name', 'manifest_sha256', 'manifest_created_at',
-    'before_ms', 'counts', 'registered_at']
+    'before_ms', 'counts', 'registered_at'],
+  archive_compactions: ['artifact_sha256', 'manifest_sha256', 'compacted_at', 'events_scanned',
+    'events_compacted', 'payload_bytes_before', 'payload_bytes_after'],
+  archive_compacted_events: ['event_id', 'artifact_sha256', 'original_payload_bytes', 'compacted_at']
 };
 
 function inspect(db) {
@@ -202,7 +205,7 @@ export async function verifyArtifactManifest({ artifact, manifest, secretFile })
 }
 
 const archiveComparisonColumns = {
-  events: ['id', 'idem_key', 'digest', 'type', 'payload', 'created_at'],
+  events: ['id', 'idem_key', 'digest', 'type', 'created_at'],
   deliveries: ['id', 'event_id', 'status', 'generation', 'attempt_count', 'max_attempts', 'next_at',
     'created_at', 'lease_until', 'lease_token', 'last_error'],
   attempts: ['token', 'delivery_id', 'generation', 'number', 'started_at', 'finished_at', 'outcome',
@@ -210,6 +213,69 @@ const archiveComparisonColumns = {
   inbox: ['delivery_id', 'accepted_at'],
   operator_actions: ['id', 'operation_key', 'digest', 'kind', 'created_at', 'result']
 };
+const archivedPayload = canonicalJson({ _runledger_archived: true });
+
+function ensureArchiveTrackingTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS archive_checkpoints (
+      artifact_sha256 TEXT PRIMARY KEY CHECK (length(artifact_sha256) = 64),
+      artifact_name TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+      manifest_created_at TEXT NOT NULL,
+      before_ms INTEGER NOT NULL,
+      counts TEXT NOT NULL CHECK (json_valid(counts)),
+      registered_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS archive_compactions (
+      artifact_sha256 TEXT PRIMARY KEY REFERENCES archive_checkpoints(artifact_sha256),
+      manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+      compacted_at INTEGER NOT NULL,
+      events_scanned INTEGER NOT NULL CHECK (events_scanned >= 0),
+      events_compacted INTEGER NOT NULL CHECK (events_compacted >= 0 AND events_compacted <= events_scanned),
+      payload_bytes_before INTEGER NOT NULL CHECK (payload_bytes_before >= 0),
+      payload_bytes_after INTEGER NOT NULL CHECK (payload_bytes_after >= 0 AND payload_bytes_after <= payload_bytes_before)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS archive_compacted_events (
+      event_id TEXT PRIMARY KEY REFERENCES events(id),
+      artifact_sha256 TEXT NOT NULL REFERENCES archive_checkpoints(artifact_sha256),
+      original_payload_bytes INTEGER NOT NULL CHECK (original_payload_bytes >= 0),
+      compacted_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS archive_compacted_events_artifact
+      ON archive_compacted_events(artifact_sha256, event_id);
+  `);
+}
+
+function compareArchiveRows(db, verified, compacted) {
+  for (const [table, columns] of Object.entries(archiveComparisonColumns)) {
+    const sourceTable = db.prepare("SELECT type FROM main.sqlite_schema WHERE name = ?").get(table);
+    if (!sourceTable && table === 'operator_actions' && verified.details.counts.operator_actions === 0) continue;
+    if (sourceTable?.type !== 'table') throw new Error('Source is missing archived table ' + table + '.');
+    const projection = columns.join(', ');
+    const mismatch = db.prepare(`
+      SELECT 1 FROM (
+        SELECT ${projection} FROM archived.${table}
+        EXCEPT
+        SELECT ${projection} FROM main.${table}
+      ) LIMIT 1
+    `).get();
+    if (mismatch) throw new Error('Archive rows diverge from source table ' + table + '.');
+  }
+  const payloadMismatch = compacted
+    ? db.prepare(`
+        SELECT 1 FROM archived.events a JOIN main.events s ON s.id = a.id
+        LEFT JOIN main.archive_compacted_events c ON c.event_id = a.id
+        WHERE c.artifact_sha256 != ? OR c.artifact_sha256 IS NULL OR
+          s.payload != CASE WHEN length(CAST(a.payload AS BLOB)) > length(CAST(? AS BLOB))
+            THEN ? ELSE a.payload END
+        LIMIT 1
+      `).get(verified.artifact_sha256, archivedPayload, archivedPayload)
+    : db.prepare(`
+        SELECT 1 FROM archived.events a JOIN main.events s ON s.id = a.id
+        WHERE s.payload != a.payload LIMIT 1
+      `).get();
+  if (payloadMismatch) throw new Error('Archive rows diverge from source table events.');
+}
 
 export async function checkpointArchive({ source, archive, manifest, secretFile, now = Date.now() }) {
   if (![source, archive, manifest, secretFile].every(value => typeof value === 'string' && value) ||
@@ -241,31 +307,10 @@ export async function checkpointArchive({ source, archive, manifest, secretFile,
     db.exec('BEGIN IMMEDIATE');
     transaction = true;
     inspect(db);
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS archive_checkpoints (
-        artifact_sha256 TEXT PRIMARY KEY CHECK (length(artifact_sha256) = 64),
-        artifact_name TEXT NOT NULL,
-        manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
-        manifest_created_at TEXT NOT NULL,
-        before_ms INTEGER NOT NULL,
-        counts TEXT NOT NULL CHECK (json_valid(counts)),
-        registered_at INTEGER NOT NULL
-      ) STRICT
-    `);
-    for (const [table, columns] of Object.entries(archiveComparisonColumns)) {
-      const sourceTable = db.prepare("SELECT type FROM main.sqlite_schema WHERE name = ?").get(table);
-      if (!sourceTable && table === 'operator_actions' && verified.details.counts.operator_actions === 0) continue;
-      if (sourceTable?.type !== 'table') throw new Error('Source is missing archived table ' + table + '.');
-      const projection = columns.join(', ');
-      const mismatch = db.prepare(`
-        SELECT 1 FROM (
-          SELECT ${projection} FROM archived.${table}
-          EXCEPT
-          SELECT ${projection} FROM main.${table}
-        ) LIMIT 1
-      `).get();
-      if (mismatch) throw new Error('Archive rows diverge from source table ' + table + '.');
-    }
+    ensureArchiveTrackingTables(db);
+    const compaction = db.prepare('SELECT 1 FROM archive_compactions WHERE artifact_sha256 = ?')
+      .get(verified.artifact_sha256);
+    compareArchiveRows(db, verified, Boolean(compaction));
     const archiveAfter = await lstat(archive, { bigint: true });
     if (!sameFileObservation(archiveBefore, archiveAfter)) throw new Error('Archive changed during checkpoint registration.');
     const manifestAfter = await lstat(manifest, { bigint: true });
@@ -277,7 +322,8 @@ export async function checkpointArchive({ source, archive, manifest, secretFile,
       transaction = false;
       return { source, archive, manifest, artifact_sha256: existing.artifact_sha256,
         manifest_sha256: existing.manifest_sha256, before_ms: existing.before_ms,
-        counts: JSON.parse(existing.counts), registered_at: existing.registered_at, duplicate: true };
+        counts: JSON.parse(existing.counts), registered_at: existing.registered_at,
+        compacted: Boolean(compaction), duplicate: true };
     }
     const counts = canonicalJson(verified.details.counts);
     db.prepare('INSERT INTO archive_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?)').run(
@@ -288,7 +334,109 @@ export async function checkpointArchive({ source, archive, manifest, secretFile,
     transaction = false;
     return { source, archive, manifest, artifact_sha256: verified.artifact_sha256,
       manifest_sha256: verified.manifest_sha256, before_ms: verified.details.before_ms,
-      counts: verified.details.counts, registered_at: now, duplicate: false };
+      counts: verified.details.counts, registered_at: now, compacted: false, duplicate: false };
+  } catch (error) {
+    if (transaction) db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    if (attached) db.exec('DETACH DATABASE archived');
+    db.close();
+  }
+}
+
+function publicCompaction(row) {
+  return { artifact_sha256: row.artifact_sha256, manifest_sha256: row.manifest_sha256,
+    compacted_at: row.compacted_at, events_scanned: row.events_scanned,
+    events_compacted: row.events_compacted, payload_bytes_before: row.payload_bytes_before,
+    payload_bytes_after: row.payload_bytes_after,
+    logical_payload_bytes_reclaimed: row.payload_bytes_before - row.payload_bytes_after };
+}
+
+export async function compactArchivedPayloads({ source, archive, manifest, secretFile, now = Date.now() }) {
+  if (![source, archive, manifest, secretFile].every(value => typeof value === 'string' && value) ||
+      !Number.isSafeInteger(now) || now < 0) {
+    throw new TypeError('Provide source, archive, manifest and secret key paths plus a valid compaction time.');
+  }
+  source = resolve(source);
+  archive = resolve(archive);
+  manifest = resolve(manifest);
+  secretFile = resolve(secretFile);
+  const sourceInfo = await lstat(source, { bigint: true });
+  const archiveBefore = await lstat(archive, { bigint: true });
+  const manifestBefore = await lstat(manifest, { bigint: true });
+  const secretInfo = await lstat(secretFile, { bigint: true });
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isFile() || sameFileIdentity(sourceInfo, archiveBefore) ||
+      sameFileIdentity(sourceInfo, manifestBefore) || sameFileIdentity(sourceInfo, secretInfo)) {
+    throw new Error('Source, archive, manifest and secret key must be distinct regular files.');
+  }
+  const verified = await verifyArtifactManifest({ artifact: archive, manifest, secretFile });
+  if (verified.artifact_kind !== 'delivered_archive') throw new Error('Payload compaction requires a delivered archive.');
+
+  const db = new DatabaseSync(source, { timeout: 4000 });
+  let attached = false;
+  let transaction = false;
+  try {
+    db.exec('PRAGMA busy_timeout = 4000; PRAGMA foreign_keys = ON;');
+    db.prepare('ATTACH DATABASE ? AS archived').run(archive);
+    attached = true;
+    db.exec('BEGIN IMMEDIATE');
+    transaction = true;
+    inspect(db);
+    ensureArchiveTrackingTables(db);
+    const checkpoint = db.prepare('SELECT manifest_sha256 FROM archive_checkpoints WHERE artifact_sha256 = ?')
+      .get(verified.artifact_sha256);
+    if (!checkpoint) throw new Error('Register this signed archive checkpoint before payload compaction.');
+    if (checkpoint.manifest_sha256 !== verified.manifest_sha256) {
+      throw new Error('Compaction manifest differs from the registered checkpoint manifest.');
+    }
+    const existing = db.prepare('SELECT * FROM archive_compactions WHERE artifact_sha256 = ?')
+      .get(verified.artifact_sha256);
+    if (existing) {
+      compareArchiveRows(db, verified, true);
+      const archiveAfter = await lstat(archive, { bigint: true });
+      const manifestAfter = await lstat(manifest, { bigint: true });
+      if (!sameFileObservation(archiveBefore, archiveAfter)) throw new Error('Archive changed during payload compaction.');
+      if (!sameFileObservation(manifestBefore, manifestAfter)) throw new Error('Manifest changed during payload compaction.');
+      db.exec('COMMIT');
+      transaction = false;
+      return { source, archive, manifest, ...publicCompaction(existing), duplicate: true };
+    }
+    compareArchiveRows(db, verified, false);
+    const stats = db.prepare(`
+      SELECT count(*) AS events_scanned,
+        coalesce(sum(length(CAST(payload AS BLOB))), 0) AS payload_bytes_before,
+        coalesce(sum(CASE WHEN length(CAST(payload AS BLOB)) > length(CAST(? AS BLOB))
+          THEN length(CAST(? AS BLOB)) ELSE length(CAST(payload AS BLOB)) END), 0) AS payload_bytes_after,
+        coalesce(sum(CASE WHEN length(CAST(payload AS BLOB)) > length(CAST(? AS BLOB)) THEN 1 ELSE 0 END), 0)
+          AS events_compacted
+      FROM archived.events
+    `).get(archivedPayload, archivedPayload, archivedPayload);
+    const changed = db.prepare(`
+      UPDATE main.events SET payload = ?
+      WHERE id IN (SELECT id FROM archived.events)
+        AND length(CAST(payload AS BLOB)) > length(CAST(? AS BLOB))
+    `).run(archivedPayload, archivedPayload);
+    if (changed.changes !== stats.events_compacted) throw new Error('Compaction update count changed inside the transaction.');
+    db.prepare(`
+      INSERT INTO main.archive_compacted_events
+        (event_id, artifact_sha256, original_payload_bytes, compacted_at)
+      SELECT id, ?, length(CAST(payload AS BLOB)), ? FROM archived.events
+    `).run(verified.artifact_sha256, now);
+    compareArchiveRows(db, verified, true);
+    db.prepare('INSERT INTO archive_compactions VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      verified.artifact_sha256, verified.manifest_sha256, now, stats.events_scanned,
+      stats.events_compacted, stats.payload_bytes_before, stats.payload_bytes_after
+    );
+    const archiveAfter = await lstat(archive, { bigint: true });
+    const manifestAfter = await lstat(manifest, { bigint: true });
+    if (!sameFileObservation(archiveBefore, archiveAfter)) throw new Error('Archive changed during payload compaction.');
+    if (!sameFileObservation(manifestBefore, manifestAfter)) throw new Error('Manifest changed during payload compaction.');
+    db.exec('COMMIT');
+    transaction = false;
+    return { source, archive, manifest, artifact_sha256: verified.artifact_sha256,
+      manifest_sha256: verified.manifest_sha256, compacted_at: now, ...stats,
+      logical_payload_bytes_reclaimed: stats.payload_bytes_before - stats.payload_bytes_after,
+      duplicate: false };
   } catch (error) {
     if (transaction) db.exec('ROLLBACK');
     throw error;
@@ -306,11 +454,27 @@ export function listArchiveCheckpoints({ source }) {
     inspect(db);
     const table = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'archive_checkpoints'").get();
     if (!table) return { source, checkpoints: [] };
-    return { source, checkpoints: db.prepare(`
+    const hasCompactions = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'archive_compactions'").get();
+    const rows = hasCompactions ? db.prepare(`
+      SELECT c.artifact_sha256, c.artifact_name, c.manifest_sha256, c.manifest_created_at,
+        c.before_ms, c.counts, c.registered_at,
+        x.manifest_sha256 AS compaction_manifest_sha256,
+        x.compacted_at, x.events_scanned, x.events_compacted,
+        x.payload_bytes_before, x.payload_bytes_after
+      FROM archive_checkpoints c LEFT JOIN archive_compactions x USING (artifact_sha256)
+      ORDER BY c.registered_at DESC, c.artifact_sha256
+    `).all() : db.prepare(`
       SELECT artifact_sha256, artifact_name, manifest_sha256, manifest_created_at,
         before_ms, counts, registered_at
       FROM archive_checkpoints ORDER BY registered_at DESC, artifact_sha256
-    `).all().map(row => ({ ...row, counts: JSON.parse(row.counts) })) };
+    `).all();
+    return { source, checkpoints: rows.map(row => {
+      const { compaction_manifest_sha256, compacted_at, events_scanned, events_compacted,
+        payload_bytes_before, payload_bytes_after, ...checkpoint } = row;
+      return { ...checkpoint, counts: JSON.parse(row.counts), compaction: compacted_at === null || compacted_at === undefined
+        ? null : publicCompaction({ artifact_sha256: row.artifact_sha256, manifest_sha256: compaction_manifest_sha256,
+          compacted_at, events_scanned, events_compacted, payload_bytes_before, payload_bytes_after }) };
+    }) };
   } finally { db.close(); }
 }
 
@@ -388,6 +552,8 @@ export async function planRetention({ source, before }) {
   try {
     db.exec('BEGIN');
     const counts = inspect(db);
+    const compactedExclusion = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'archive_compacted_events'").get()
+      ? 'AND NOT EXISTS (SELECT 1 FROM archive_compacted_events c WHERE c.event_id = e.id)' : '';
     // Completion age, not event age: a recent replay must not look expired.
     // Unfinished history is excluded even if the current status says delivered.
     const candidate = db.prepare(`
@@ -397,6 +563,7 @@ export async function planRetention({ source, before }) {
           AND (SELECT max(a.finished_at) FROM attempts a WHERE a.delivery_id = d.id
             AND a.generation = d.generation AND a.outcome = 'delivered') < ?
           AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.delivery_id = d.id AND a.finished_at IS NULL)
+          ${compactedExclusion}
       )
       SELECT count(*) AS deliveries,
         coalesce(sum(length(CAST(payload AS BLOB))), 0) AS payload_bytes,
@@ -427,6 +594,8 @@ export async function planRetention({ source, before }) {
 }
 
 function eligibleDeliveries(db, before) {
+  const compactedExclusion = db.prepare("SELECT type FROM sqlite_schema WHERE name = 'archive_compacted_events'").get()
+    ? 'AND NOT EXISTS (SELECT 1 FROM archive_compacted_events c WHERE c.event_id = e.id)' : '';
   return db.prepare(`
     SELECT d.*, e.id AS source_event_id, e.idem_key, e.digest, e.type, e.payload,
       e.created_at AS event_created_at
@@ -435,6 +604,7 @@ function eligibleDeliveries(db, before) {
       AND (SELECT max(a.finished_at) FROM attempts a WHERE a.delivery_id = d.id
         AND a.generation = d.generation AND a.outcome = 'delivered') < ?
       AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.delivery_id = d.id AND a.finished_at IS NULL)
+      ${compactedExclusion}
     ORDER BY d.created_at, d.id
   `).all(before);
 }
@@ -665,6 +835,10 @@ export async function main(argv = process.argv.slice(2)) {
       if (!parsed.values.source || !parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
           archiveOptions.length !== 1 || archiveManifestOptions.length !== 1) throw new Error();
+    } else if (operation === 'compact-payloads') {
+      if (!parsed.values.source || !parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
+          parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
+          archiveOptions.length !== 1 || archiveManifestOptions.length !== 1) throw new Error();
     } else if (operation === 'list-checkpoints') {
       if (!parsed.values.source || parsed.values['secret-file'] || parsed.values.id || parsed.values.artifact ||
           parsed.values.manifest || parsed.values.output || parsed.values.before !== undefined ||
@@ -691,6 +865,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.error('       node maintenance.mjs verify-manifest --artifact file.sqlite --manifest file.manifest.json --secret-file key');
     console.error('       node maintenance.mjs locate-history --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key --id value');
     console.error('       node maintenance.mjs checkpoint-archive --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key');
+    console.error('       node maintenance.mjs compact-payloads --source ledger.sqlite --archive old.sqlite --archive-manifest old.manifest.json --secret-file key');
     console.error('       node maintenance.mjs list-checkpoints --source ledger.sqlite');
     return 2;
   }
@@ -708,6 +883,9 @@ export async function main(argv = process.argv.slice(2)) {
               ({ artifact, manifest: parsed.values['archive-manifest'][index] })) })
         : operation === 'checkpoint-archive'
           ? await checkpointArchive({ source: parsed.values.source, archive: parsed.values.archive[0],
+            manifest: parsed.values['archive-manifest'][0], secretFile: parsed.values['secret-file'] })
+        : operation === 'compact-payloads'
+          ? await compactArchivedPayloads({ source: parsed.values.source, archive: parsed.values.archive[0],
             manifest: parsed.values['archive-manifest'][0], secretFile: parsed.values['secret-file'] })
         : operation === 'list-checkpoints'
           ? listArchiveCheckpoints({ source: parsed.values.source })

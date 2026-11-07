@@ -126,6 +126,23 @@ export function openStore(path, { maxAttempts = 4, leaseMs = 5000 } = {}) {
       counts TEXT NOT NULL CHECK (json_valid(counts)),
       registered_at INTEGER NOT NULL
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS archive_compactions (
+      artifact_sha256 TEXT PRIMARY KEY REFERENCES archive_checkpoints(artifact_sha256),
+      manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+      compacted_at INTEGER NOT NULL,
+      events_scanned INTEGER NOT NULL CHECK (events_scanned >= 0),
+      events_compacted INTEGER NOT NULL CHECK (events_compacted >= 0 AND events_compacted <= events_scanned),
+      payload_bytes_before INTEGER NOT NULL CHECK (payload_bytes_before >= 0),
+      payload_bytes_after INTEGER NOT NULL CHECK (payload_bytes_after >= 0 AND payload_bytes_after <= payload_bytes_before)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS archive_compacted_events (
+      event_id TEXT PRIMARY KEY REFERENCES events(id),
+      artifact_sha256 TEXT NOT NULL REFERENCES archive_checkpoints(artifact_sha256),
+      original_payload_bytes INTEGER NOT NULL CHECK (original_payload_bytes >= 0),
+      compacted_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS archive_compacted_events_artifact
+      ON archive_compacted_events(artifact_sha256, event_id);
   `);
 
   function transaction(callback, write = true) {

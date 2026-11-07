@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { archiveDelivered, checkpointArchive, createArtifactManifest, listArchiveCheckpoints,
+import { archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, listArchiveCheckpoints,
   planRetention, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
@@ -719,4 +719,170 @@ test('Archive checkpoint CLI serializes concurrent registration and validates on
     error => error.code === 2);
   await assert.rejects(execute(process.execPath, [...args, '--output', f.path('extra')]),
     error => error.code === 2);
+});
+
+test('Payload compaction preserves identities, receipts, replay history and exact metrics', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const largeEvent = { key: 'large-completed', type: 'run.completed', payload: { data: '长'.repeat(200) } };
+  const large = source.ingest(largeEvent, 100);
+  source.finish(source.claim(100), { outcome: 'dead', httpStatus: 503 }, 110);
+  source.replayMany({ operation_key: 'compact-replay',
+    deliveries: [{ id: large.delivery_id, generation: 1 }] }, 120);
+  source.finish(source.claim(120), { outcome: 'delivered', httpStatus: 200 }, 130);
+  source.receive(large.delivery_id, 131);
+  const smallEvent = { key: 'small-completed', type: 'run.completed', payload: {} };
+  const small = source.ingest(smallEvent, 140);
+  source.finish(source.claim(140), { outcome: 'delivered', httpStatus: 200 }, 150);
+  const metrics = source.metrics(5000);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 22));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  const checkpoint = await checkpointArchive({ ...request, now: 2000 });
+  const compacted = await compactArchivedPayloads({ ...request, now: 3000 });
+  assert.equal(compacted.duplicate, false);
+  assert.equal(compacted.events_scanned, 2);
+  assert.equal(compacted.events_compacted, 1);
+  assert.ok(compacted.logical_payload_bytes_reclaimed > 500);
+  assert.deepEqual(source.detail(large.delivery_id).delivery.payload, { _runledger_archived: true });
+  assert.deepEqual(source.detail(small.delivery_id).delivery.payload, {});
+  assert.deepEqual(source.metrics(5000), metrics);
+  assert.deepEqual(source.ingest(largeEvent, 4000), { ...large, duplicate: true });
+  assert.deepEqual(source.receive(large.delivery_id, 4001), { status: 200, duplicate: true });
+  assert.equal(source.operatorActions().length, 1);
+  const listed = listArchiveCheckpoints({ source: f.path('source.sqlite') }).checkpoints[0];
+  assert.equal(listed.compaction.artifact_sha256, checkpoint.artifact_sha256);
+  assert.equal(listed.compaction.logical_payload_bytes_reclaimed, compacted.logical_payload_bytes_reclaimed);
+  const repeated = await checkpointArchive({ ...request, now: 5000 });
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.compacted, true);
+});
+
+test('Payload compaction requires the registered signed checkpoint boundary', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const original = { key: 'checkpoint-required', type: 'run.completed', payload: { data: 'x'.repeat(200) } };
+  const accepted = source.ingest(original, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 23));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  await assert.rejects(compactArchivedPayloads({ source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') }), /Register.*checkpoint/);
+  assert.deepEqual(source.detail(accepted.delivery_id).delivery.payload, original.payload);
+  assert.equal(listArchiveCheckpoints({ source: f.path('source.sqlite') }).checkpoints.length, 0);
+});
+
+test('Payload compaction rejects source drift after checkpoint and records no receipt', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const original = { key: 'drifted-source', type: 'run.completed', payload: { data: 'x'.repeat(200) } };
+  const accepted = source.ingest(original, 100);
+  source.finish(source.claim(100), { outcome: 'delivered', httpStatus: 200 }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 24));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  await checkpointArchive({ ...request, now: 2000 });
+  const db = new DatabaseSync(f.path('source.sqlite'));
+  try { db.prepare('UPDATE deliveries SET attempt_count = 7 WHERE id = ?').run(accepted.delivery_id); }
+  finally { db.close(); }
+  await assert.rejects(compactArchivedPayloads({ ...request, now: 3000 }), /deliveries/);
+  assert.deepEqual(source.detail(accepted.delivery_id).delivery.payload, original.payload);
+  assert.equal(listArchiveCheckpoints({ source: f.path('source.sqlite') }).checkpoints[0].compaction, null);
+});
+
+test('Payload compaction rolls back every payload and mapping after a mid-update failure', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const inputs = [1, 2].map(index => ({ key: 'rollback-' + index, type: 'run.completed',
+    payload: { data: String(index).repeat(200) } }));
+  const accepted = inputs.map((input, index) => source.ingest(input, 100 + index * 20));
+  for (let index = 0; index < accepted.length; index++) {
+    source.finish(source.claim(100 + index * 20), { outcome: 'delivered' }, 110 + index * 20);
+  }
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 25));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  await checkpointArchive({ ...request, now: 2000 });
+  const db = new DatabaseSync(f.path('source.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER fail_second_compaction BEFORE UPDATE OF payload ON events
+      WHEN NEW.id = '${accepted[1].event_id}' BEGIN SELECT RAISE(ABORT, 'forced compaction failure'); END`);
+  } finally { db.close(); }
+  await assert.rejects(compactArchivedPayloads({ ...request, now: 3000 }), /forced compaction failure/);
+  for (let index = 0; index < accepted.length; index++) {
+    assert.deepEqual(source.detail(accepted[index].delivery_id).delivery.payload, inputs[index].payload);
+  }
+  const checked = new DatabaseSync(f.path('source.sqlite'), { readOnly: true });
+  try {
+    assert.equal(checked.prepare('SELECT count(*) AS count FROM archive_compactions').get().count, 0);
+    assert.equal(checked.prepare('SELECT count(*) AS count FROM archive_compacted_events').get().count, 0);
+  } finally { checked.close(); }
+});
+
+test('Payload compaction CLI serializes concurrent requests and returns one durable receipt', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  source.ingest({ key: 'concurrent-compact', type: 'run.completed', payload: { data: 'x'.repeat(200) } }, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 26));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  await checkpointArchive({ ...request, now: 2000 });
+  const args = [cli, 'compact-payloads', '--source', request.source, '--archive', request.archive,
+    '--archive-manifest', request.manifest, '--secret-file', request.secretFile];
+  const results = await Promise.all([execute(process.execPath, args), execute(process.execPath, args)]);
+  assert.deepEqual(results.map(result => JSON.parse(result.stdout).duplicate).sort(), [false, true]);
+  const listed = JSON.parse((await execute(process.execPath,
+    [cli, 'list-checkpoints', '--source', request.source])).stdout);
+  assert.equal(listed.checkpoints[0].compaction.events_compacted, 1);
+  await assert.rejects(execute(process.execPath, [...args, '--archive', f.path('extra')]),
+    error => error.code === 2);
+});
+
+test('Backups retain compaction receipts and later archives select only fresh payloads', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const firstEvent = { key: 'already-compacted', type: 'run.completed', payload: { data: 'x'.repeat(200) } };
+  const first = source.ingest(firstEvent, 100);
+  source.finish(source.claim(100), { outcome: 'delivered' }, 110);
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 27));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const request = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  const checkpoint = await checkpointArchive({ ...request, now: 2000 });
+  await compactArchivedPayloads({ ...request, now: 3000 });
+  const second = source.ingest({ key: 'fresh-archive', type: 'run.completed', payload: { data: 'fresh' } }, 400);
+  source.finish(source.claim(400), { outcome: 'delivered' }, 410);
+  assert.deepEqual((await planRetention({ source: request.source, before: 1000 })).candidates,
+    { deliveries: 1, payload_bytes: Buffer.byteLength(JSON.stringify({ data: 'fresh' })), attempts: 1 });
+  const next = await archiveDelivered({ source: request.source, output: f.path('next.sqlite'), before: 1000 });
+  assert.equal(next.counts.deliveries, 1);
+  const nextDb = new DatabaseSync(f.path('next.sqlite'), { readOnly: true });
+  try {
+    assert.equal(nextDb.prepare('SELECT id FROM deliveries').get().id, second.delivery_id);
+    assert.equal(nextDb.prepare('SELECT count(*) AS count FROM events WHERE id = ?').get(first.event_id).count, 0);
+  } finally { nextDb.close(); }
+  await snapshotLedger({ source: request.source, output: f.path('backup.sqlite') });
+  const backup = new DatabaseSync(f.path('backup.sqlite'), { readOnly: true });
+  try {
+    assert.equal(backup.prepare('SELECT artifact_sha256 FROM archive_compactions').get().artifact_sha256,
+      checkpoint.artifact_sha256);
+    assert.equal(backup.prepare('SELECT count(*) AS count FROM archive_compacted_events').get().count, 1);
+  } finally { backup.close(); }
 });
