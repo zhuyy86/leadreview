@@ -765,6 +765,87 @@ export async function archiveDelivered({ source, output, before }) {
   }
 }
 
+export async function repackLedger({ source, output }) {
+  if (typeof source !== 'string' || !source || typeof output !== 'string' || !output) {
+    throw new TypeError('Provide source and output file paths.');
+  }
+  source = resolve(source);
+  output = resolve(output);
+  const suffixes = ['-wal', '-shm', '-journal'];
+  if (output.toLowerCase() === source.toLowerCase() ||
+      suffixes.some(suffix => output.toLowerCase() === (source + suffix).toLowerCase())) {
+    throw new Error('Repacked output must be separate from the source database and its sidecars.');
+  }
+  const sourceInfo = await lstat(source, { bigint: true });
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isFile()) {
+    throw new Error('Source must be a regular database file, not a symbolic link.');
+  }
+  for (const path of [output, ...suffixes.map(suffix => output + suffix)]) {
+    try {
+      await lstat(path);
+      throw new Error('Repacked output or its SQLite sidecar already exists; choose a new file path.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+
+  const db = new DatabaseSync(source, { readOnly: true, timeout: 4000 });
+  let staging;
+  try {
+    db.exec('PRAGMA busy_timeout = 4000; PRAGMA foreign_keys = ON;');
+    inspect(db);
+    const pageSize = db.prepare('PRAGMA page_size').get().page_size;
+    const sourcePages = db.prepare('PRAGMA page_count').get().page_count;
+    const sourceFreelist = db.prepare('PRAGMA freelist_count').get().freelist_count;
+    await mkdir(dirname(output), { recursive: true });
+    staging = await mkdtemp(join(dirname(output), '.runledger-repack-'));
+    const temporary = join(staging, 'repacked.sqlite');
+    db.prepare('VACUUM INTO ?').run(temporary);
+
+    const candidate = new DatabaseSync(temporary);
+    let counts;
+    let outputPages;
+    let outputFreelist;
+    try {
+      candidate.exec('PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;');
+      counts = inspect(candidate);
+      outputPages = candidate.prepare('PRAGMA page_count').get().page_count;
+      outputFreelist = candidate.prepare('PRAGMA freelist_count').get().freelist_count;
+      if (outputFreelist !== 0) throw new Error('Repacked database retained free-list pages.');
+    } finally { candidate.close(); }
+
+    await chmod(temporary, 0o600);
+    const handle = await open(temporary, 'r+');
+    try { await handle.sync(); } finally { await handle.close(); }
+    const sha256 = await hashFile(temporary);
+    const { size: bytes } = await stat(temporary);
+    const sourceAfter = await lstat(source, { bigint: true });
+    if (!sourceAfter.isFile() || !sameFileIdentity(sourceInfo, sourceAfter)) {
+      throw new Error('Source database identity changed during repack.');
+    }
+    await link(temporary, output);
+
+    const published = new DatabaseSync(output, { readOnly: true, timeout: 4000 });
+    try {
+      if (canonicalJson(inspect(published)) !== canonicalJson(counts) ||
+          published.prepare('PRAGMA freelist_count').get().freelist_count !== 0) {
+        throw new Error('Published repacked database validation failed.');
+      }
+    } finally { published.close(); }
+    return { source, output, bytes, sha256, counts,
+      source_storage: { page_size: pageSize, pages: sourcePages, freelist_pages: sourceFreelist,
+        logical_page_bytes: pageSize * sourcePages, logical_freelist_bytes: pageSize * sourceFreelist },
+      output_storage: { page_size: pageSize, pages: outputPages, freelist_pages: outputFreelist,
+        logical_page_bytes: pageSize * outputPages },
+      logical_page_bytes_delta: pageSize * sourcePages - pageSize * outputPages,
+      source_modified: false, completed_at: new Date().toISOString() };
+  } finally {
+    try { db.close(); } finally {
+      if (staging) await rm(staging, { recursive: true, force: true });
+    }
+  }
+}
+
 export async function snapshotLedger({ source, output, onProgress }) {
   if (typeof source !== 'string' || !source || typeof output !== 'string' || !output) {
     throw new TypeError('Provide source and output file paths.');
@@ -869,12 +950,13 @@ export async function main(argv = process.argv.slice(2)) {
       if (!parsed.values.output || !/^\d{1,16}$/.test(parsed.values.before ?? '') ||
           Number(parsed.values.before) > 8640000000000000 || archiveOptions.length ||
           archiveManifestOptions.length || parsed.values.id) throw new Error();
-    } else if (!['backup', 'restore'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined ||
+    } else if (!['backup', 'restore', 'repack'].includes(operation) || !parsed.values.output || parsed.values.before !== undefined ||
         archiveOptions.length || archiveManifestOptions.length || parsed.values.id) {
       throw new Error();
     }
   } catch {
     console.error('Usage: node maintenance.mjs backup|restore --source ledger.sqlite --output new.sqlite');
+    console.error('       node maintenance.mjs repack --source ledger.sqlite --output compacted.sqlite');
     console.error('       node maintenance.mjs archive --source ledger.sqlite --output archive.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs retention-plan --source ledger.sqlite --before epoch_milliseconds');
     console.error('       node maintenance.mjs sign-manifest --artifact file.sqlite --output file.manifest.json --secret-file key');
@@ -905,6 +987,8 @@ export async function main(argv = process.argv.slice(2)) {
             manifest: parsed.values['archive-manifest'][0], secretFile: parsed.values['secret-file'] })
         : operation === 'list-checkpoints'
           ? listArchiveCheckpoints({ source: parsed.values.source })
+        : operation === 'repack'
+          ? await repackLedger({ source: parsed.values.source, output: parsed.values.output })
         : operation === 'retention-plan'
           ? await planRetention({ source: parsed.values.source, before: Number(parsed.values.before) })
           : operation === 'archive'

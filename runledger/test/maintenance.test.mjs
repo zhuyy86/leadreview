@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { archiveDelivered, checkpointArchive, compactArchivedPayloads, createArtifactManifest, historyLookupSql,
   listArchiveCheckpoints,
-  planRetention, snapshotLedger,
+  planRetention, repackLedger, snapshotLedger,
   locateHistory, verifyArtifactManifest } from '../maintenance.mjs';
 import { openStore } from '../store.mjs';
 
@@ -29,7 +29,7 @@ async function fixture(t) {
     async noStaging() {
       assert.ok((await readdir(root)).every(name =>
         !name.startsWith('.runledger-snapshot-') && !name.startsWith('.runledger-archive-') &&
-        !name.startsWith('.runledger-manifest-')));
+        !name.startsWith('.runledger-manifest-') && !name.startsWith('.runledger-repack-')));
     },
     open(name, options) {
       const store = openStore(join(root, name), options);
@@ -164,6 +164,83 @@ test('CLI backup and restore return verifiable JSON while invalid arguments retu
   assert.equal(JSON.parse(second.stdout).counts.events, 1);
   assert.equal(f.open('recovered.sqlite').overview().stats.queued, 1);
   await assert.rejects(execute(process.execPath, [cli, 'restore']), error => error.code === 2 && error.stderr.includes('Usage:'));
+});
+
+test('Online repack preserves WAL state, idempotency, metrics and compaction receipts in a smaller candidate', async t => {
+  const f = await fixture(t);
+  const source = f.open('source.sqlite');
+  const inputs = [];
+  const accepted = [];
+  for (let index = 0; index < 24; index++) {
+    const input = { key: 'repack-' + index, type: 'run.completed', payload: { data: 'x'.repeat(4096), index } };
+    inputs.push(input);
+    accepted.push(source.ingest(input, 100 + index * 10));
+    source.finish(source.claim(100 + index * 10), { outcome: 'delivered', httpStatus: 200 }, 101 + index * 10);
+  }
+  await archiveDelivered({ source: f.path('source.sqlite'), output: f.path('archive.sqlite'), before: 1000 });
+  await writeFile(f.path('secret.key'), Buffer.alloc(32, 30));
+  await createArtifactManifest({ artifact: f.path('archive.sqlite'), output: f.path('archive.manifest.json'),
+    secretFile: f.path('secret.key') });
+  const archiveRequest = { source: f.path('source.sqlite'), archive: f.path('archive.sqlite'),
+    manifest: f.path('archive.manifest.json'), secretFile: f.path('secret.key') };
+  await checkpointArchive({ ...archiveRequest, now: 2000 });
+  await compactArchivedPayloads({ ...archiveRequest, now: 3000 });
+  const metrics = source.metrics(4000);
+  const result = await repackLedger({ source: f.path('source.sqlite'), output: f.path('repacked.sqlite') });
+  assert.ok(result.logical_page_bytes_delta > 0);
+  assert.ok(result.output_storage.pages < result.source_storage.pages);
+  assert.equal(result.output_storage.freelist_pages, 0);
+  const repacked = f.open('repacked.sqlite');
+  assert.deepEqual(repacked.metrics(4000), metrics);
+  assert.deepEqual(repacked.ingest(inputs[0], 5000), { ...accepted[0], duplicate: true });
+  assert.deepEqual(repacked.detail(accepted[0].delivery_id).delivery.payload, { _runledger_archived: true });
+  const db = new DatabaseSync(f.path('repacked.sqlite'), { readOnly: true });
+  try {
+    assert.equal(db.prepare('SELECT count(*) AS count FROM archive_checkpoints').get().count, 1);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM archive_compactions').get().count, 1);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM archive_compacted_events').get().count, 24);
+  } finally { db.close(); }
+});
+
+test('Competing repack publishers produce one complete validated candidate', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const options = { source: f.path('source.sqlite'), output: f.path('repacked.sqlite') };
+  const results = await Promise.allSettled([repackLedger(options), repackLedger(options)]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+  const winner = results.find(result => result.status === 'fulfilled').value;
+  assert.equal(winner.sha256, createHash('sha256').update(await readFile(options.output)).digest('hex'));
+  assert.equal(f.open('repacked.sqlite').overview().stats.queued, 1);
+  await f.noStaging();
+});
+
+test('Repack rejects aliases, existing targets and incompatible sources before publication', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  await assert.rejects(repackLedger({ source: f.path('source.sqlite'), output: f.path('source.sqlite') }), /separate/);
+  await assert.rejects(repackLedger({ source: f.path('source.sqlite'), output: f.path('source.sqlite-wal') }), /sidecars/);
+  await writeFile(f.path('existing.sqlite'), 'keep');
+  await assert.rejects(repackLedger({ source: f.path('source.sqlite'), output: f.path('existing.sqlite') }), /already exists/);
+  assert.equal(await readFile(f.path('existing.sqlite'), 'utf8'), 'keep');
+  await writeFile(f.path('broken.sqlite'), 'broken');
+  await assert.rejects(repackLedger({ source: f.path('broken.sqlite'), output: f.path('broken-out.sqlite') }));
+  await assert.rejects(stat(f.path('broken-out.sqlite')), { code: 'ENOENT' });
+  await f.noStaging();
+});
+
+test('Repack CLI returns verifiable storage evidence and enforces its argument shape', async t => {
+  const f = await fixture(t);
+  f.open('source.sqlite').ingest(event);
+  const args = [cli, 'repack', '--source', f.path('source.sqlite'), '--output', f.path('repacked.sqlite')];
+  const result = JSON.parse((await execute(process.execPath, args)).stdout);
+  assert.equal(result.operation, 'repack');
+  assert.equal(result.source_modified, false);
+  assert.equal(result.output_storage.freelist_pages, 0);
+  assert.match(result.sha256, /^[0-9a-f]{64}$/);
+  await assert.rejects(execute(process.execPath, [...args, '--before', '1000']), error => error.code === 2);
+  await assert.rejects(execute(process.execPath, [cli, 'repack', '--source', f.path('source.sqlite')]),
+    error => error.code === 2);
 });
 
 test('Retention preview protects active/dead work, idempotency and inbox without modifying the ledger', async t => {
