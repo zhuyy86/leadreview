@@ -51,7 +51,7 @@ node --test
 node verify-workload.mjs
 ```
 
-- **75 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, verified cross-file lookup, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **81 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, archive checkpoints, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -157,7 +157,7 @@ node verify-archive.mjs --deliveries 500
 
 Each archive preserves eligible event IDs, idempotency keys/digests, delivery rows, every attempt generation, matching inbox receipts and complete replay-operation receipts that touch an included delivery. A mixed replay receipt can therefore mention another delivery that remains source-only. Archive metadata records counts, the strict cutoff, identity contract and exact nearest-rank latency populations. The file is integrity- and foreign-key-checked, file-synced and published through an exclusive hard link; competing writers produce one winner. Legacy ledgers that predate operation receipts remain readable.
 
-The source transaction is read-only and retains every row, so duplicate submissions, receiver deduplication, live metrics and operator history continue unchanged. Archive creation establishes a verifiable preservation boundary. Logical payload bytes from the preview do not predict reclaimed SQLite file size. Source cleanup and checkpoint policy remain separate operational work.
+The source transaction is read-only and retains every row, so duplicate submissions, receiver deduplication, live metrics and operator history continue unchanged. Archive creation establishes a verifiable preservation boundary. Logical payload bytes from the preview do not predict reclaimed SQLite file size. Signed checkpoint registration is available before source cleanup; physical cleanup remains a separate policy and command.
 
 The [recorded archive workload](docs/archive-workload.json) generated 500 completed source deliveries, including 50 dead-letter replays. Its strict midpoint cutoff archived 250 deliveries, 275 attempt generations, 63 inbox receipts and 25 replay-operation receipts. The script reopens the standalone file, checks its rows, integrity, foreign keys, metric contract and SHA-256, then confirms the source metrics and idempotent submission still match. The record contains local environment and timing scope; Linux/Windows CI runs a 100-delivery variant.
 
@@ -175,6 +175,23 @@ node maintenance.mjs locate-history \
 ```
 
 The command performs exact matching on delivery ID, event ID or idempotency key. It validates the active ledger, authenticates and re-inspects every archive, observes stable artifact identity through lookup, then returns one logical match with every active/archive location. Artifact checksum and manifest creation time accompany archive locations. Identical copies merge by delivery ID; any difference in identity, type, timestamps, status, generation or attempt counters raises a conflict. Empty results still report how many archives were verified.
+
+### Signed archive checkpoints
+
+Register a preservation checkpoint only after producing and signing the archive:
+
+```sh
+node maintenance.mjs checkpoint-archive \
+  --source data/runledger.sqlite \
+  --archive archives/2026-10.sqlite \
+  --archive-manifest archives/2026-10.manifest.json \
+  --secret-file backups/manifest.key
+node maintenance.mjs list-checkpoints --source data/runledger.sqlite
+```
+
+Registration authenticates the manifest and observes stable archive and manifest identities. Under one `BEGIN IMMEDIATE` source transaction it compares every archived event, delivery, attempt, inbox receipt and replay-operation receipt against the source, including nullable fields. A differing or missing row rolls back the registration. A matching archive writes its artifact SHA-256, manifest SHA-256, signed cutoff, signed row counts and registration time to `archive_checkpoints`. The artifact hash is the idempotency key: concurrent processes produce one record, while repeated registration revalidates every source row before returning the original checkpoint. Online backup and restore carry this table with the ledger.
+
+This checkpoint is durable evidence that the signed archive matched one locked source snapshot. Source rows remain present and live metrics keep their current populations. A later cleanup command must define which identities, inbox receipts, metrics and operator records stay online before it can consume the checkpoint.
 
 
 ## Dispatch operations
