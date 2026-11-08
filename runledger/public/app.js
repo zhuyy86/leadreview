@@ -521,4 +521,60 @@ select('#latency-summary').addEventListener('toggle', event => {
 });
 select('#latency-refresh').addEventListener('click', loadLatency);
 
+function renderHistoryHealth(health) {
+  const cache = health.cache;
+  select('#history-health').textContent = health.enabled
+    ? `${number.format(health.archives_configured)} signed archives · ${number.format(cache.entries)}/${number.format(cache.max_entries)} cached · ${number.format(cache.hits)} hits · ${number.format(cache.misses)} misses · ${number.format(cache.invalidations)} invalidations · ${number.format(cache.expirations)} expirations`
+    : 'Archive lookup is ready for configuration through the service environment.';
+  select('#history-id').disabled = !health.enabled;
+  select('#history-search').disabled = !health.enabled;
+  select('#history-status').textContent = health.enabled
+    ? `${number.format(health.totals.successes)} successful lookups · ${number.format(health.totals.failures)} failed verifications`
+    : 'Configure signed archive pairs and their verification key to search retained history.';
+}
+
+async function loadHistoryHealth() {
+  try {
+    const data = await request('/api/metrics');
+    renderHistoryHealth(data.history_lookup);
+  } catch (error) {
+    select('#history-status').textContent = error.message || 'History health is unavailable.';
+  }
+}
+
+async function searchHistory() {
+  const input = select('#history-id');
+  const button = select('#history-search');
+  const query = input.value.trim();
+  if (!query || button.disabled) return;
+  button.disabled = true;
+  select('#history-status').textContent = 'Authenticating archives and searching exact identities…';
+  select('#history-results').replaceChildren();
+  try {
+    const data = await request('/api/history?id=' + encodeURIComponent(query));
+    select('#history-results').replaceChildren(...data.matches.map(match => {
+      const item = element('li');
+      item.append(element('strong', null, match.delivery_id),
+        ` · ${match.type} · ${match.status} · ${number.format(match.locations.length)} locations`);
+      return item;
+    }));
+    select('#history-status').textContent = data.matches.length
+      ? `${number.format(data.matches.length)} exact match${data.matches.length === 1 ? '' : 'es'} · ${number.format(data.archives_verified)} archives verified`
+      : `${number.format(data.archives_verified)} archives verified · No exact match`;
+    await loadHistoryHealth();
+  } catch (error) {
+    select('#history-status').textContent = error.message || 'History lookup failed.';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+select('#history-summary').addEventListener('toggle', event => {
+  if (event.currentTarget.open) void loadHistoryHealth();
+});
+select('#history-search').addEventListener('click', searchHistory);
+select('#history-id').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); void searchHistory(); }
+});
+
 void poll();

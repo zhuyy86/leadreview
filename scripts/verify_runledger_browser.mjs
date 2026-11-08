@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
+import { archiveDelivered, createArtifactManifest } from '../runledger/maintenance.mjs';
 import { startApp } from '../runledger/server.mjs';
+import { openStore } from '../runledger/store.mjs';
 import { runWorker } from '../runledger/worker.mjs';
 
 test('Browser finds an old dead letter, pages the ledger, rejects stale results and replays', { timeout: 30_000 }, async () => {
@@ -197,5 +200,47 @@ test('Browser recovers a lost batch-replay acknowledgment through its saved oper
   } finally {
     if (browser) await browser.close();
     await app.close();
+  }
+});
+
+test('Browser searches authenticated retained history and displays cache health', { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runledger-browser-history-'));
+  const source = join(root, 'source.sqlite');
+  const archive = join(root, 'archive.sqlite');
+  const manifest = join(root, 'archive.manifest.json');
+  const key = join(root, 'archive.key');
+  const seed = openStore(source);
+  const identity = seed.ingest({ key: 'browser-history', type: 'ai.run.completed', payload: { retained: true } }, 100);
+  seed.finish(seed.claim(100), { outcome: 'delivered', httpStatus: 204 }, 110);
+  seed.close();
+  await writeFile(key, 'browser-history-secret-material-32-bytes');
+  await archiveDelivered({ source, output: archive, before: 200 });
+  await createArtifactManifest({ artifact: archive, output: manifest, secretFile: key });
+  const app = await startApp({ databasePath: source, port: 0, workerCount: 0,
+    historyArchives: [{ artifact: archive, manifest }], historySecretFile: key });
+  let browser;
+  try {
+    browser = await chromium.launch({
+      ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}), headless: true
+    });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(app.url);
+    await page.locator('#history-summary > summary').click();
+    await page.waitForFunction(() => document.querySelector('#history-health').textContent.includes('1 signed archives'));
+    await page.locator('#history-id').fill(identity.delivery_id);
+    await page.locator('#history-search').click();
+    await page.waitForFunction(() => document.querySelector('#history-status').textContent.includes('1 exact match'));
+    assert.match(await page.locator('#history-results').textContent(), /2 locations/);
+    assert.match(await page.locator('#history-health').textContent(), /1 misses/);
+    await page.locator('#history-search').click();
+    await page.waitForFunction(() => document.querySelector('#history-health').textContent.includes('1 hits'));
+    assert.deepEqual(errors, []);
+  } finally {
+    if (browser) await browser.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

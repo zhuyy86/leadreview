@@ -3,6 +3,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createHistoryLookupService } from './history-service.mjs';
 import { DomainError, openStore } from './store.mjs';
 import { runWorker, verify } from './worker.mjs';
 
@@ -58,11 +59,24 @@ function validatePayload(value, depth = 0) {
 export async function startApp({
   databasePath = resolve('data/runledger.sqlite'),
   port = 4327, workerCount = 2, baseDelayMs = 500, timeoutMs = 1800,
-  leaseMs = 5000, maxAttempts = 4, secret = demoSecret
+  leaseMs = 5000, maxAttempts = 4, secret = demoSecret,
+  historyArchives = [], historySecretFile,
+  historyCacheMaxEntries = Math.max(1, historyArchives.length), historyCacheTtlMs = 60_000,
+  logger = console
 } = {}) {
   if (leaseMs <= timeoutMs) throw new Error('Worker lease must exceed request timeout.');
+  if (!logger || typeof logger.error !== 'function') throw new TypeError('Logger must provide an error function.');
   if (databasePath !== ':memory:') await mkdir(dirname(databasePath), { recursive: true });
   const store = openStore(databasePath, { leaseMs, maxAttempts });
+  let history;
+  try {
+    history = createHistoryLookupService({ source: databasePath, archives: historyArchives,
+      secretFile: historySecretFile, cacheMaxEntries: historyCacheMaxEntries,
+      cacheTtlMs: historyCacheTtlMs });
+  } catch (error) {
+    store.close();
+    throw error;
+  }
   const server = createServer({ requestTimeout: 10_000, headersTimeout: 5000 }, async (req, res) => {
     try {
       const host = req.headers.host;
@@ -101,7 +115,19 @@ export async function startApp({
           limit: limit === null ? 25 : Number(limit), cursor: searchParams.get('cursor')
         }));
       }
-      if (req.method === 'GET' && pathname === '/api/metrics') return json(res, 200, store.metrics());
+      if (req.method === 'GET' && pathname === '/api/metrics') {
+        return json(res, 200, { ...store.metrics(), history_lookup: history.health() });
+      }
+      if (req.method === 'GET' && pathname === '/api/history') {
+        const keys = [...searchParams.keys()];
+        const query = searchParams.get('id');
+        if (keys.length !== 1 || keys[0] !== 'id' || searchParams.getAll('id').length !== 1 ||
+            typeof query !== 'string' || query.length < 1 || query.length > 256) {
+          throw new DomainError(400, 'Use one history id from 1 to 256 characters.');
+        }
+        if (!history.health().enabled) throw new DomainError(503, 'Signed archive history is not configured.');
+        return json(res, 200, await history.lookup(query));
+      }
       if (req.method === 'POST' && pathname === '/api/replays') {
         const result = store.replayMany(await readJson(req));
         return json(res, result.duplicate ? 200 : 202, result);
@@ -167,7 +193,7 @@ export async function startApp({
       return json(res, 404, { error: 'Route not found.' });
     } catch (error) {
       if (error instanceof DomainError) return json(res, error.status, { error: error.message });
-      console.error(error);
+      logger.error(error);
       return json(res, 500, { error: 'RunLedger could not complete the request.' });
     }
   });
@@ -194,12 +220,37 @@ export async function startApp({
   };
 }
 
+export function historyOptionsFromEnv(environment = process.env) {
+  const rawArchives = environment.RUNLEDGER_ARCHIVES_JSON;
+  const secretFile = environment.RUNLEDGER_ARCHIVE_SECRET;
+  if (rawArchives === undefined && secretFile === undefined) return {};
+  if (typeof rawArchives !== 'string' || !rawArchives || typeof secretFile !== 'string' || !secretFile) {
+    throw new Error('Set RUNLEDGER_ARCHIVES_JSON and RUNLEDGER_ARCHIVE_SECRET together.');
+  }
+  let historyArchives;
+  try { historyArchives = JSON.parse(rawArchives); } catch { throw new Error('RUNLEDGER_ARCHIVES_JSON must be valid JSON.'); }
+  if (!Array.isArray(historyArchives)) throw new Error('RUNLEDGER_ARCHIVES_JSON must contain an array.');
+  const integer = (name, fallback) => {
+    const raw = environment[name];
+    if (raw === undefined) return fallback;
+    if (!/^\d+$/.test(raw)) throw new Error(name + ' must be a positive integer.');
+    return Number(raw);
+  };
+  return {
+    historyArchives,
+    historySecretFile: secretFile,
+    historyCacheMaxEntries: integer('RUNLEDGER_HISTORY_CACHE_ENTRIES', Math.max(1, historyArchives.length)),
+    historyCacheTtlMs: integer('RUNLEDGER_HISTORY_CACHE_TTL_MS', 60_000)
+  };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const app = await startApp({
     databasePath: process.env.RUNLEDGER_DB || resolve('data/runledger.sqlite'),
     port: Number(process.env.RUNLEDGER_PORT || 4327),
     workerCount: Number(process.env.RUNLEDGER_WORKERS || 2),
-    secret: process.env.RUNLEDGER_SECRET ? Buffer.from(process.env.RUNLEDGER_SECRET) : demoSecret
+    secret: process.env.RUNLEDGER_SECRET ? Buffer.from(process.env.RUNLEDGER_SECRET) : demoSecret,
+    ...historyOptionsFromEnv()
   });
   console.log('RunLedger is running at ' + app.url);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {

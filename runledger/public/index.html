@@ -114,6 +114,17 @@
           <div id="latency-rows"></div>
           <div class="latency-controls"><button id="latency-refresh" type="button" class="button secondary">Refresh measurements</button><span id="latency-status" role="status">Open to measure the ledger.</span></div>
         </details>
+        <details id="history-summary" class="latency-summary">
+          <summary>Search retained history</summary>
+          <p>Exact delivery, event or idempotency identity across the active ledger and authenticated archives.</p>
+          <div class="history-health" id="history-health">Open to inspect archive verification health.</div>
+          <div class="history-controls">
+            <label><span class="sr-only">Delivery event or idempotency identity</span><input id="history-id" type="search" maxlength="256" autocomplete="off" placeholder="Exact delivery, event or idempotency ID"></label>
+            <button id="history-search" type="button" class="button secondary">Search history</button>
+          </div>
+          <div id="history-status" role="status">Archive history status loads when opened.</div>
+          <ol id="history-results" class="history-results"></ol>
+        </details>
         <div class="replay-toolbar" aria-label="Batch replay">
           <span id="selection-count" role="status">0 selected</span>
           <button id="select-dead-page" type="button">Select dead letters on page</button>
