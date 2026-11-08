@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { archiveDelivered, createArtifactManifest } from '../maintenance.mjs';
+import { createHistoryLookupService } from '../history-service.mjs';
 import { historyOptionsFromEnv, startApp } from '../server.mjs';
 import { openStore } from '../store.mjs';
 
@@ -53,7 +54,58 @@ test('History API reuses authenticated archives and publishes cache health', asy
   assert.equal(metrics.history_lookup.cache.entries, 1);
   assert.equal(metrics.history_lookup.cache.hits, 1);
   assert.equal(metrics.history_lookup.cache.misses, 1);
+  assert.equal(metrics.history_lookup.latency.status, 'collecting');
+  assert.equal(metrics.history_lookup.latency.sample_count, 2);
+  assert.equal(metrics.history_lookup.latency.total_samples, 2);
+  assert.equal(metrics.history_lookup.latency.histogram.at(-1).count, 2);
+  assert.ok(metrics.history_lookup.latency.p95_ms >= 0);
   assert.ok(Number.isSafeInteger(metrics.history_lookup.last_succeeded_at));
+});
+
+test('History latency window reports percentiles, bounded samples and threshold states', async () => {
+  let durationNow = 0;
+  let nextDuration = 0;
+  const service = createHistoryLookupService({
+    source: 'source.sqlite', archives: [{ artifact: 'archive.sqlite', manifest: 'archive.json' }],
+    secretFile: 'archive.key', clock: () => 1000, durationClock: () => durationNow,
+    latencyWindowSize: 20, latencyWarningMs: 50, latencyCriticalMs: 100,
+    latencyMinimumSamples: 3,
+    lookupHistory: async () => {
+      durationNow += nextDuration;
+      return { matches: [], verification_cache: { hits: 0, misses: 1, coalesced: 0, bypassed: 0 } };
+    }
+  });
+  const observe = async duration => { nextDuration = duration; await service.lookup('exact-id'); };
+
+  await observe(10);
+  await observe(10);
+  assert.equal(service.health().latency.status, 'collecting');
+  await observe(50);
+  let latency = service.health().latency;
+  assert.equal(latency.status, 'warning');
+  assert.deepEqual([latency.min_ms, latency.mean_ms, latency.max_ms], [10, 23.333, 50]);
+  assert.deepEqual([latency.p50_ms, latency.p95_ms, latency.p99_ms], [10, 50, 50]);
+  assert.equal(latency.histogram.find(bucket => bucket.le_ms === 10).count, 2);
+  assert.equal(latency.histogram.find(bucket => bucket.le_ms === 50).count, 3);
+
+  await observe(100);
+  assert.equal(service.health().latency.status, 'critical');
+  for (let index = 0; index < 19; index++) await observe(10);
+  latency = service.health().latency;
+  assert.equal(latency.status, 'healthy');
+  assert.equal(latency.sample_count, 20);
+  assert.equal(latency.total_samples, 23);
+  assert.equal(latency.dropped_samples, 3);
+  assert.deepEqual([latency.p50_ms, latency.p95_ms, latency.p99_ms], [10, 10, 100]);
+  assert.equal(latency.histogram.at(-1).le_ms, null);
+  assert.equal(latency.histogram.at(-1).count, 20);
+
+  assert.throws(() => createHistoryLookupService({
+    source: 'source.sqlite', archives: [], latencyWarningMs: 100, latencyCriticalMs: 100
+  }), /ordered/);
+  assert.throws(() => createHistoryLookupService({
+    source: 'source.sqlite', archives: [], latencyWindowSize: 19
+  }), /20-10000/);
 });
 
 test('History API validates exact queries and records failed reauthentication', async t => {
@@ -92,13 +144,21 @@ test('History API advertises its disabled state and environment options are stri
   assert.deepEqual(historyOptionsFromEnv({
     RUNLEDGER_ARCHIVES_JSON: '[{"artifact":"a.sqlite","manifest":"a.json"}]',
     RUNLEDGER_ARCHIVE_SECRET: 'key', RUNLEDGER_HISTORY_CACHE_ENTRIES: '7',
-    RUNLEDGER_HISTORY_CACHE_TTL_MS: '9000'
+    RUNLEDGER_HISTORY_CACHE_TTL_MS: '9000', RUNLEDGER_HISTORY_LATENCY_WINDOW: '40',
+    RUNLEDGER_HISTORY_LATENCY_WARNING_MS: '80', RUNLEDGER_HISTORY_LATENCY_CRITICAL_MS: '250',
+    RUNLEDGER_HISTORY_LATENCY_MINIMUM_SAMPLES: '8'
   }), {
     historyArchives: [{ artifact: 'a.sqlite', manifest: 'a.json' }],
-    historySecretFile: 'key', historyCacheMaxEntries: 7, historyCacheTtlMs: 9000
+    historySecretFile: 'key', historyCacheMaxEntries: 7, historyCacheTtlMs: 9000,
+    historyLatencyWindowSize: 40, historyLatencyWarningMs: 80,
+    historyLatencyCriticalMs: 250, historyLatencyMinimumSamples: 8
   });
   assert.throws(() => historyOptionsFromEnv({ RUNLEDGER_ARCHIVES_JSON: '[]' }), /together/);
   assert.throws(() => historyOptionsFromEnv({
     RUNLEDGER_ARCHIVES_JSON: 'not-json', RUNLEDGER_ARCHIVE_SECRET: 'key'
   }), /valid JSON/);
+  assert.throws(() => historyOptionsFromEnv({
+    RUNLEDGER_ARCHIVES_JSON: '[]', RUNLEDGER_ARCHIVE_SECRET: 'key',
+    RUNLEDGER_HISTORY_LATENCY_WARNING_MS: 'fast'
+  }), /positive integer/);
 });

@@ -62,6 +62,8 @@ export async function startApp({
   leaseMs = 5000, maxAttempts = 4, secret = demoSecret,
   historyArchives = [], historySecretFile,
   historyCacheMaxEntries = Math.max(1, historyArchives.length), historyCacheTtlMs = 60_000,
+  historyLatencyWindowSize = 256, historyLatencyWarningMs = 250,
+  historyLatencyCriticalMs = 1000, historyLatencyMinimumSamples = 5,
   logger = console
 } = {}) {
   if (leaseMs <= timeoutMs) throw new Error('Worker lease must exceed request timeout.');
@@ -72,7 +74,9 @@ export async function startApp({
   try {
     history = createHistoryLookupService({ source: databasePath, archives: historyArchives,
       secretFile: historySecretFile, cacheMaxEntries: historyCacheMaxEntries,
-      cacheTtlMs: historyCacheTtlMs });
+      cacheTtlMs: historyCacheTtlMs, latencyWindowSize: historyLatencyWindowSize,
+      latencyWarningMs: historyLatencyWarningMs, latencyCriticalMs: historyLatencyCriticalMs,
+      latencyMinimumSamples: historyLatencyMinimumSamples });
   } catch (error) {
     store.close();
     throw error;
@@ -240,7 +244,11 @@ export function historyOptionsFromEnv(environment = process.env) {
     historyArchives,
     historySecretFile: secretFile,
     historyCacheMaxEntries: integer('RUNLEDGER_HISTORY_CACHE_ENTRIES', Math.max(1, historyArchives.length)),
-    historyCacheTtlMs: integer('RUNLEDGER_HISTORY_CACHE_TTL_MS', 60_000)
+    historyCacheTtlMs: integer('RUNLEDGER_HISTORY_CACHE_TTL_MS', 60_000),
+    historyLatencyWindowSize: integer('RUNLEDGER_HISTORY_LATENCY_WINDOW', 256),
+    historyLatencyWarningMs: integer('RUNLEDGER_HISTORY_LATENCY_WARNING_MS', 250),
+    historyLatencyCriticalMs: integer('RUNLEDGER_HISTORY_LATENCY_CRITICAL_MS', 1000),
+    historyLatencyMinimumSamples: integer('RUNLEDGER_HISTORY_LATENCY_MINIMUM_SAMPLES', 5)
   };
 }
 

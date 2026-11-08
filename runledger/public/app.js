@@ -523,9 +523,14 @@ select('#latency-refresh').addEventListener('click', loadLatency);
 
 function renderHistoryHealth(health, updateStatus = true) {
   const cache = health.cache;
+  const latency = health.latency;
+  const latencySummary = latency.status === 'collecting'
+    ? `latency collecting ${number.format(latency.sample_count)}/${number.format(latency.minimum_samples)}`
+    : `latency p95 ${number.format(latency.p95_ms)} ms · ${latency.status}`;
   select('#history-health').textContent = health.enabled
-    ? `${number.format(health.archives_configured)} signed archives · ${number.format(cache.entries)}/${number.format(cache.max_entries)} cached · ${number.format(cache.hits)} hits · ${number.format(cache.misses)} misses · ${number.format(cache.invalidations)} invalidations · ${number.format(cache.expirations)} expirations`
+    ? `${number.format(health.archives_configured)} signed archives · ${number.format(cache.entries)}/${number.format(cache.max_entries)} cached · ${number.format(cache.hits)} hits · ${number.format(cache.misses)} misses · ${number.format(cache.invalidations)} invalidations · ${number.format(cache.expirations)} expirations · ${latencySummary}`
     : 'Archive lookup is ready for configuration through the service environment.';
+  select('#history-health').classList.toggle('warning', ['warning', 'critical'].includes(latency.status));
   select('#history-id').disabled = !health.enabled;
   select('#history-search').disabled = !health.enabled;
   if (updateStatus) {

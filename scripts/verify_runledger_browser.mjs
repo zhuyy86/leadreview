@@ -217,7 +217,8 @@ test('Browser searches authenticated retained history and displays cache health'
   await archiveDelivered({ source, output: archive, before: 200 });
   await createArtifactManifest({ artifact: archive, output: manifest, secretFile: key });
   const app = await startApp({ databasePath: source, port: 0, workerCount: 0,
-    historyArchives: [{ artifact: archive, manifest }], historySecretFile: key });
+    historyArchives: [{ artifact: archive, manifest }], historySecretFile: key,
+    historyLatencyWarningMs: 1, historyLatencyCriticalMs: 2, historyLatencyMinimumSamples: 1 });
   let browser;
   try {
     browser = await chromium.launch({
@@ -235,6 +236,8 @@ test('Browser searches authenticated retained history and displays cache health'
     await page.waitForFunction(() => document.querySelector('#history-status').textContent.includes('1 exact match'));
     assert.match(await page.locator('#history-results').textContent(), /2 locations/);
     assert.match(await page.locator('#history-health').textContent(), /1 misses/);
+    assert.match(await page.locator('#history-health').textContent(), /latency p95 .* ms · critical/);
+    assert.equal(await page.locator('#history-health').evaluate(node => node.classList.contains('warning')), true);
     await page.locator('#history-search').click();
     await page.waitForFunction(() => document.querySelector('#history-health').textContent.includes('1 hits'));
     assert.deepEqual(errors, []);
