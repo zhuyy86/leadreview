@@ -52,7 +52,7 @@ node verify-workload.mjs
 node verify-lookup.mjs
 ```
 
-- **99 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, indexed lookup plans, bounded verification-cache freshness, archive checkpoints, transactional payload compaction, signed database activation, retry scheduling, queue measurements and real HTTP transport boundaries.
+- **102 passing scenarios** cover idempotency conflicts, lease fencing, replay history, inbox persistence, a hard-killed worker process, live HTTP recovery, raw-body signature checks, a lost acknowledgment, preserved-history archives, signed artifact manifests, indexed lookup plans, operator-facing cache health, archive checkpoints, transactional payload compaction, signed database activation, retry scheduling, queue measurements and real HTTP transport boundaries.
 - **200 local HTTP submissions** ran in batches of 20 with two worker loops. The 100 repeated submissions returned their existing IDs. All 100 distinct events were delivered and recorded by the receiver.
 - **A real process exit** leaves the winning claim in SQLite. A fresh connection reclaims it under a different token and rejects the stale completion.
 - **A lost acknowledgment** produces two HTTP attempts and one committed inbox record. The second receipt increments the duplicate counter.
@@ -61,7 +61,7 @@ node verify-lookup.mjs
 
 The verification script uses a temporary database. The latest local run used Linux and Node.js 24.22.1. The [CI workflow](../.github/workflows/verify.yml) runs the same checks on Linux and Windows with Node.js 24; inspect its run result separately from local verification.
 
-For the browser regression, run `npm ci` and `npx playwright install chromium` from the repository root, then `node scripts/verify_runledger_browser.mjs`. It checks pagination over 131 deliveries, an old dead letter, out-of-order search responses, replay history, empty results and a 390-pixel viewport. `CHROMIUM_EXECUTABLE` can select an installed browser. The CI browser job runs this check separately from the dependency-free Node.js suites.
+For the browser regression, run `npm ci` and `npx playwright install chromium` from the repository root, then `node scripts/verify_runledger_browser.mjs`. Its three scenarios cover pagination over 131 deliveries, stale search responses, lost replay acknowledgments, exact signed-archive lookup, warm-cache health and a 390-pixel viewport. `CHROMIUM_EXECUTABLE` can select an installed browser. The CI browser job runs this check separately from the dependency-free Node.js suites.
 
 ## API
 
@@ -69,7 +69,8 @@ For the browser regression, run `npm ci` and `npx playwright install chromium` f
 | --- | --- |
 | `POST /api/events` | Submit `{"type":"ai.run.completed","payload":{"run":"r-1"}}` with a unique `Idempotency-Key`. |
 | `GET /api/overview` | Read global queue counts, filtered delivery pages and receiver counters. Supports `status`, `q`, `limit` and `cursor`. |
-| `GET /api/metrics` | Read an uncached snapshot of queue health, attempt outcomes and latency populations. |
+| `GET /api/metrics` | Read an uncached snapshot of queue health, attempt outcomes, latency populations and retained-history cache health. |
+| `GET /api/history?id=...` | Search one exact delivery, event or idempotency identity across the active ledger and configured signed archives. |
 | `GET /api/deliveries/:id` | Read the event and attempt history. |
 | `POST /api/deliveries/:id/replay` | Start a new attempt generation for a dead delivery. |
 
@@ -198,15 +199,27 @@ const verificationCache = createArchiveVerificationCache({
 });
 
 await locateHistory({
-  sourcePath,
-  archivePairs,
-  secretPath,
+  source: sourcePath,
+  archives: archivePairs,
+  secretFile: secretPath,
   query,
   verificationCache,
 });
 ```
 
 The in-process LRU coalesces concurrent verification for the same archive/manifest/key tuple and reuses a successful result within its TTL. Every hit compares absolute path, device, inode, size, modification time and change time for the archive, manifest and secret key. The same observations are repeated after the archive query. Expiry, eviction or any identity/metadata change triggers full HMAC, SHA-256, SQLite integrity, foreign-key and metadata verification; a rejected verification is removed immediately. Each result reports request-level hit, miss, coalesced and bypassed counts. A one-shot CLI invocation starts with a cold cache.
+
+The HTTP service owns one cache for its lifetime. Configure archive/manifest pairs and the separate key channel before startup:
+
+```sh
+export RUNLEDGER_ARCHIVES_JSON='[{"artifact":"archives/2026-10.sqlite","manifest":"archives/2026-10.manifest.json"}]'
+export RUNLEDGER_ARCHIVE_SECRET='backups/manifest.key'
+export RUNLEDGER_HISTORY_CACHE_ENTRIES=20
+export RUNLEDGER_HISTORY_CACHE_TTL_MS=60000
+node server.mjs
+```
+
+The console's retained-history panel calls `GET /api/history` and displays exact matches with their active/archive location count. `GET /api/metrics` exposes configured archives; cumulative requests, successes, failures and matches; request-level cache outcomes; live entries; hits, misses, coalescing, invalidations, expirations and evictions; plus the latest start, success, failure and verification error. With no archive configuration, the panel reports readiness and the history endpoint returns HTTP 503. Strict startup validation keeps pair, key, capacity and TTL configuration within the same bounds as the underlying verifier.
 
 The [recorded lookup workload](docs/lookup-workload.json) uses 20,000 active deliveries, four signed copies of a 10,000-row archive and 1,000 probes per database. On that local Linux/Node.js 24 run, prepared-query p50 measured 0.007 ms for the active ledger and 0.006 ms for the archive. A lookup through four archives measured 97.99 ms with cold verification and 29.63 ms with identity-checked warm entries, a 3.3x difference in that run. Reproduce and refresh the report with `node verify-lookup.mjs --output docs/lookup-workload.json`; CI uses a smaller 2,000-row fixture with the same four-archive default and asserts index-directed plans on Linux and Windows.
 
