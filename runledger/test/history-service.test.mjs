@@ -7,9 +7,8 @@ import { archiveDelivered, createArtifactManifest } from '../maintenance.mjs';
 import { historyOptionsFromEnv, startApp } from '../server.mjs';
 import { openStore } from '../store.mjs';
 
-async function historyFixture(t) {
+async function historyFixture() {
   const root = await mkdtemp(join(tmpdir(), 'runledger-history-service-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, 'source.sqlite');
   const archive = join(root, 'archive.sqlite');
   const manifest = join(root, 'archive.manifest.json');
@@ -22,15 +21,15 @@ async function historyFixture(t) {
   await writeFile(secretFile, 'history-service-secret-material-32-bytes');
   await archiveDelivered({ source, output: archive, before: 200 });
   await createArtifactManifest({ artifact: archive, output: manifest, secretFile });
-  return { source, archive, manifest, secretFile, identity };
+  return { root, source, archive, manifest, secretFile, identity };
 }
 
 test('History API reuses authenticated archives and publishes cache health', async t => {
-  const f = await historyFixture(t);
+  const f = await historyFixture();
   const app = await startApp({ databasePath: f.source, port: 0, workerCount: 0,
     historyArchives: [{ artifact: f.archive, manifest: f.manifest }],
     historySecretFile: f.secretFile, historyCacheMaxEntries: 1, historyCacheTtlMs: 60_000 });
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); await rm(f.root, { recursive: true, force: true }); });
 
   for (let index = 0; index < 2; index++) {
     const response = await fetch(app.url + '/api/history?id=' + f.identity.delivery_id);
@@ -58,11 +57,11 @@ test('History API reuses authenticated archives and publishes cache health', asy
 });
 
 test('History API validates exact queries and records failed reauthentication', async t => {
-  const f = await historyFixture(t);
+  const f = await historyFixture();
   const app = await startApp({ databasePath: f.source, port: 0, workerCount: 0,
     historyArchives: [{ artifact: f.archive, manifest: f.manifest }], historySecretFile: f.secretFile,
     logger: { error() {} } });
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); await rm(f.root, { recursive: true, force: true }); });
 
   assert.equal((await fetch(app.url + '/api/history')).status, 400);
   assert.equal((await fetch(app.url + '/api/history?id=a&id=b')).status, 400);
