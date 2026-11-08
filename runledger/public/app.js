@@ -521,22 +521,24 @@ select('#latency-summary').addEventListener('toggle', event => {
 });
 select('#latency-refresh').addEventListener('click', loadLatency);
 
-function renderHistoryHealth(health) {
+function renderHistoryHealth(health, updateStatus = true) {
   const cache = health.cache;
   select('#history-health').textContent = health.enabled
     ? `${number.format(health.archives_configured)} signed archives · ${number.format(cache.entries)}/${number.format(cache.max_entries)} cached · ${number.format(cache.hits)} hits · ${number.format(cache.misses)} misses · ${number.format(cache.invalidations)} invalidations · ${number.format(cache.expirations)} expirations`
     : 'Archive lookup is ready for configuration through the service environment.';
   select('#history-id').disabled = !health.enabled;
   select('#history-search').disabled = !health.enabled;
-  select('#history-status').textContent = health.enabled
-    ? `${number.format(health.totals.successes)} successful lookups · ${number.format(health.totals.failures)} failed verifications`
-    : 'Configure signed archive pairs and their verification key to search retained history.';
+  if (updateStatus) {
+    select('#history-status').textContent = health.enabled
+      ? `${number.format(health.totals.successes)} successful lookups · ${number.format(health.totals.failures)} failed verifications`
+      : 'Configure signed archive pairs and their verification key to search retained history.';
+  }
 }
 
-async function loadHistoryHealth() {
+async function loadHistoryHealth(updateStatus = true) {
   try {
     const data = await request('/api/metrics');
-    renderHistoryHealth(data.history_lookup);
+    renderHistoryHealth(data.history_lookup, updateStatus);
   } catch (error) {
     select('#history-status').textContent = error.message || 'History health is unavailable.';
   }
@@ -558,10 +560,11 @@ async function searchHistory() {
         ` · ${match.type} · ${match.status} · ${number.format(match.locations.length)} locations`);
       return item;
     }));
-    select('#history-status').textContent = data.matches.length
+    const resultStatus = data.matches.length
       ? `${number.format(data.matches.length)} exact match${data.matches.length === 1 ? '' : 'es'} · ${number.format(data.archives_verified)} archives verified`
       : `${number.format(data.archives_verified)} archives verified · No exact match`;
-    await loadHistoryHealth();
+    await loadHistoryHealth(false);
+    select('#history-status').textContent = resultStatus;
   } catch (error) {
     select('#history-status').textContent = error.message || 'History lookup failed.';
   } finally {
